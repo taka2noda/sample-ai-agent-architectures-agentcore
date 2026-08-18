@@ -7,6 +7,6 @@ version = 0.1
 stack_name = "iteration2"
 resolve_s3 = true
 s3_prefix = "iteration2"
-region = "us-east-1"
+region = "us-west-2"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"

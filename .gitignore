@@ -1,2 +1,9 @@
 .DS_Store
 iteration-3/frontend/agent-architecture-samples.code-workspace
+
+# Local deployment tracking (contains account IDs/ARNs/credentials, not for commit)
+PROGRESS.md
+**/.bedrock_agentcore.yaml
+**/.bedrock_agentcore/
+**/.venv/
+**/.aws-sam/

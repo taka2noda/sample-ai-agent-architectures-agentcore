@@ -1,6 +1,43 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <script>
+    (function(h,o,u,n,d) {
+      h=h[d]=h[d]||{q:[],onReady:function(c){h.q.push(c)}}
+      d=o.createElement(u);d.async=1;d.src=n
+      n=o.getElementsByTagName(u)[0];n.parentNode.insertBefore(d,n)
+    })(window,document,'script','https://www.datadoghq-browser-agent.com/us1/v6/datadog-rum.js','DD_RUM')
+
+    window.DD_RUM.onReady(function() {
+      window.DD_RUM && window.DD_RUM.init({
+        applicationId: 'ca0c7f15-0d7f-479b-8da5-d5170498155b',
+        clientToken: 'pubf6faa841d4b774a10660ffb0af13ee79',
+        site: 'datadoghq.com',
+        service: 'agentcore-iteration-0-frontend',
+        env: 'sandbox',
+        version: '1.0.0',
+        sessionSampleRate: 100,
+        sessionReplaySampleRate: 20,
+        trackUserInteractions: true,
+        trackResources: true,
+        trackLongTasks: true,
+      });
+    });
+  </script>
+  <script>
+    (function(h,o,u,n,d) {
+      h=h[d]=h[d]||{q:[],onReady:function(c){h.q.push(c)}}
+      d=o.createElement(u);d.async=1;d.src=n
+      n=o.getElementsByTagName(u)[0];n.parentNode.insertBefore(d,n)
+    })(window,document,'script','https://www.datadoghq-browser-agent.com/us1/v6/datadog-logs.js','DD_LOGS')
+    window.DD_LOGS.onReady(function() {
+      window.DD_LOGS.init({
+        clientToken: 'pubf6faa841d4b774a10660ffb0af13ee79',
+        site: 'datadoghq.com',
+        forwardErrorsToLogs: true,
+      })
+    })
+  </script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Iteration 0 - AgentCore + Cognito</title>
@@ -59,7 +96,7 @@
       cognitoDomain: 'apigw-agentcore-<YOUR_ACCOUNT_ID>.auth.<YOUR_REGION>.amazoncognito.com',
       clientId: '<YOUR_CLIENT_ID>',
       redirectUri: 'http://localhost:8000',
-      
+
       // AgentCore Runtime ARN - UPDATE THIS after running: agentcore deploy
       // Copy the ARN from the deploy output
       agentRuntimeArn: 'arn:aws:bedrock-agentcore:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:runtime/<YOUR_AGENT_RUNTIME_ID>'

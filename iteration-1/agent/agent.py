@@ -1,4 +1,14 @@
 import os
+
+from ddtrace.llmobs import LLMObs
+
+LLMObs.enable(
+    ml_app=os.environ.get("DD_LLMOBS_ML_APP_NAME", "agentcore-iteration-1-agent"),
+    api_key=os.environ.get("DD_API_KEY"),
+    site=os.environ.get("DD_SITE", "datadoghq.com"),
+    agentless_enabled=True,
+)
+
 import json
 import urllib.request
 from datetime import datetime
@@ -9,7 +19,7 @@ from langgraph.prebuilt import create_react_agent
 
 app = BedrockAgentCoreApp()
 
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
 MODEL_ID = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 

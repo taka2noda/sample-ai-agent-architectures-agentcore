@@ -1,15 +1,27 @@
 import os
+
+from ddtrace.llmobs import LLMObs
+
+LLMObs.enable(
+    ml_app=os.environ.get("DD_LLMOBS_ML_APP_NAME", "agentcore-iteration-2-agent"),
+    api_key=os.environ.get("DD_API_KEY"),
+    site=os.environ.get("DD_SITE", "datadoghq.com"),
+    agentless_enabled=True,
+)
+
 import json
 import urllib.request
 from datetime import datetime
 
+from ddtrace import tracer
+from ddtrace.propagation.http import HTTPPropagator
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from langchain_aws import ChatBedrockConverse
 from langgraph.prebuilt import create_react_agent
 
 app = BedrockAgentCoreApp()
 
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
 MODEL_ID = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
@@ -61,7 +73,33 @@ def get_agent():
 @app.entrypoint
 def invoke(payload, context):
     prompt = payload.get("prompt", "Hello!") if payload else "Hello!"
-    result = get_agent().invoke({"messages": [("human", prompt)]})
+
+    # Join the caller's (e.g. Lambda's) Datadog trace, if one was passed in the
+    # payload, so LLM-call spans generated below land in that same trace
+    # instead of a disconnected one. invoke_agent_runtime is a SigV4-signed AWS
+    # API call, so the caller can't send this as a real HTTP header - it rides
+    # in the JSON payload instead.
+    # Activating a bare extracted Context isn't enough: LangGraph's Pregel
+    # runtime executes nodes via concurrent.futures.ThreadPoolExecutor, and
+    # ddtrace's futures integration only propagates an actual *active Span*
+    # into worker threads, not a span-less remote Context. So open a real
+    # local span as a child of the extracted context first.
+    dd_trace_headers = payload.get("_datadog_trace_headers") if payload else None
+    dd_context = HTTPPropagator.extract(dd_trace_headers) if dd_trace_headers else None
+
+    if dd_context and dd_context.trace_id:
+        span = tracer.start_span(
+            "agentcore.invoke",
+            child_of=dd_context,
+            service=os.environ.get("DD_SERVICE"),
+            activate=True,
+        )
+        try:
+            result = get_agent().invoke({"messages": [("human", prompt)]})
+        finally:
+            span.finish()
+    else:
+        result = get_agent().invoke({"messages": [("human", prompt)]})
     
     for msg in reversed(result.get("messages", [])):
         if hasattr(msg, 'content') and msg.type == "ai":

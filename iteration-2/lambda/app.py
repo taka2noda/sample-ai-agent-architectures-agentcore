@@ -3,6 +3,9 @@ import os
 import boto3
 import logging
 
+from ddtrace import tracer
+from ddtrace.propagation.http import HTTPPropagator
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -35,12 +38,19 @@ def lambda_handler(event, context):
         body = json.loads(event.get("body", "{}"))
         message = body.get("message", "")
         
+        # Inject the current Datadog trace context into the payload so the
+        # AgentCore-side agent can join this trace (invoke_agent_runtime is a
+        # SigV4-signed AWS API call, not HTTP, so ddtrace can't inject headers
+        # automatically - the AWS SDK call itself carries no space for them).
+        dd_trace_headers = {}
+        HTTPPropagator.inject(tracer.current_trace_context(), dd_trace_headers)
+
         # Invoke AgentCore Runtime
         client = _get_client()
         response = client.invoke_agent_runtime(
             agentRuntimeArn=AGENTCORE_RUNTIME_ARN,
             qualifier="DEFAULT",
-            payload=json.dumps({"prompt": message})
+            payload=json.dumps({"prompt": message, "_datadog_trace_headers": dd_trace_headers})
         )
         
         # Parse JSON response

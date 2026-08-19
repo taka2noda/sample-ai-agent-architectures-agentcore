@@ -9,6 +9,7 @@ LLMObs.enable(
     agentless_enabled=True,
 )
 
+import contextlib
 import json
 import urllib.request
 from datetime import datetime
@@ -83,22 +84,18 @@ def invoke(payload, context):
     # runtime executes nodes via concurrent.futures.ThreadPoolExecutor, and
     # ddtrace's futures integration only propagates an actual *active Span*
     # into worker threads, not a span-less remote Context. So open a real
-    # local span as a child of the extracted context first.
+    # local span as a child of the extracted context first. Span implements
+    # the context-manager protocol (auto-finish on exit), so nullcontext()
+    # covers the no-incoming-trace case without duplicating the invoke() call.
     dd_trace_headers = payload.get("_datadog_trace_headers") if payload else None
     dd_context = HTTPPropagator.extract(dd_trace_headers) if dd_trace_headers else None
 
-    if dd_context and dd_context.trace_id:
-        span = tracer.start_span(
-            "agentcore.invoke",
-            child_of=dd_context,
-            service=os.environ.get("DD_SERVICE"),
-            activate=True,
-        )
-        try:
-            result = get_agent().invoke({"messages": [("human", prompt)]})
-        finally:
-            span.finish()
-    else:
+    span_ctx = (
+        tracer.start_span("agentcore.invoke", child_of=dd_context, service=os.environ.get("DD_SERVICE"), activate=True)
+        if dd_context and dd_context.trace_id
+        else contextlib.nullcontext()
+    )
+    with span_ctx:
         result = get_agent().invoke({"messages": [("human", prompt)]})
     
     for msg in reversed(result.get("messages", [])):

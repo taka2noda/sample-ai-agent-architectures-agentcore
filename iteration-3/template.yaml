@@ -1,5 +1,14 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Transform: AWS::Serverless-2016-10-31
+Transform:
+  - AWS::Serverless-2016-10-31
+  - Name: DatadogServerless
+    Parameters:
+      stackName: !Ref "AWS::StackName"
+      apiKey: !Ref DatadogApiKey
+      pythonLayerVersion: "127"
+      extensionLayerVersion: "99"
+      env: sandbox
+      site: datadoghq.com
 Description: 'Iteration 3: API Gateway + Lambda + AgentCore with Memory'
 
 Parameters:
@@ -14,6 +23,11 @@ Parameters:
   CognitoUserPoolArn:
     Type: String
     Description: Cognito User Pool ARN for authorizer
+
+  DatadogApiKey:
+    Type: String
+    NoEcho: true
+    Description: Datadog API key (pass via --parameter-overrides, do not hardcode)
 
 Globals:
   Function:
@@ -61,13 +75,15 @@ Resources:
   ChatFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub '${AWS::StackName}-chat'
+      FunctionName: iteration3-chat
       CodeUri: functions/chat/
       Handler: app.lambda_handler
       Environment:
         Variables:
           AGENTCORE_RUNTIME_ARN: !Ref AgentCoreRuntimeArn
           CONVERSATION_TABLE: !Ref ConversationMetadataTable
+          DD_TRACE_PROPAGATION_STYLE: datadog,tracecontext
+          DD_SERVICE: agentcore-iteration-3-chat
       Policies:
         - Version: '2012-10-17'
           Statement:
@@ -89,13 +105,14 @@ Resources:
   ConversationsFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub '${AWS::StackName}-conversations'
+      FunctionName: iteration3-conversations
       CodeUri: functions/conversations/
       Handler: app.lambda_handler
       Environment:
         Variables:
           AGENTCORE_MEMORY_ID: !Ref AgentCoreMemoryId
           CONVERSATION_TABLE: !Ref ConversationMetadataTable
+          DD_SERVICE: agentcore-iteration-3-conversations
       Policies:
         - Version: '2012-10-17'
           Statement:

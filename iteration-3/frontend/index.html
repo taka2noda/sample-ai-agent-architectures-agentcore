@@ -1,6 +1,43 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <script>
+    (function(h,o,u,n,d) {
+      h=h[d]=h[d]||{q:[],onReady:function(c){h.q.push(c)}}
+      d=o.createElement(u);d.async=1;d.src=n
+      n=o.getElementsByTagName(u)[0];n.parentNode.insertBefore(d,n)
+    })(window,document,'script','https://www.datadoghq-browser-agent.com/us1/v6/datadog-rum.js','DD_RUM')
+
+    window.DD_RUM.onReady(function() {
+      window.DD_RUM && window.DD_RUM.init({
+        applicationId: 'a24747ea-e215-41b3-9bc6-a85f442d743c',
+        clientToken: 'pub92eb34b3bbb7bfaf0b8bc981b445a233',
+        site: 'datadoghq.com',
+        service: 'agentcore-iteration-3-frontend',
+        env: 'sandbox',
+        version: '1.0.0',
+        sessionSampleRate: 100,
+        sessionReplaySampleRate: 20,
+        trackUserInteractions: true,
+        trackResources: true,
+        trackLongTasks: true,
+      });
+    });
+  </script>
+  <script>
+    (function(h,o,u,n,d) {
+      h=h[d]=h[d]||{q:[],onReady:function(c){h.q.push(c)}}
+      d=o.createElement(u);d.async=1;d.src=n
+      n=o.getElementsByTagName(u)[0];n.parentNode.insertBefore(d,n)
+    })(window,document,'script','https://www.datadoghq-browser-agent.com/us1/v6/datadog-logs.js','DD_LOGS')
+    window.DD_LOGS.onReady(function() {
+      window.DD_LOGS.init({
+        clientToken: 'pub92eb34b3bbb7bfaf0b8bc981b445a233',
+        site: 'datadoghq.com',
+        forwardErrorsToLogs: true,
+      })
+    })
+  </script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Iteration 3 - Lambda + AgentCore with Memory</title>

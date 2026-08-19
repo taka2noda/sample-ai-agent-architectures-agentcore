@@ -4,7 +4,7 @@ This repository contains different architectural patterns for deploying AI agent
 
 All agents included are simple prototypes using LangGraph but could be extended for different use cases. The focus of this is the surrounding architectural components, not the agent functionality itself.
 
-> **This is a fork** of [aws-samples/sample-ai-agent-architectures-agentcore](https://github.com/aws-samples/sample-ai-agent-architectures-agentcore), extended to add **Datadog observability** (RUM, APM, and LLM/Agent Observability) on top of each AWS architecture pattern. See [Datadog Observability](#datadog-observability-this-fork) below for what was added and known issues. See `CLAUDE.md` for the working conventions used to build this out.
+> **This is a fork** of [aws-samples/sample-ai-agent-architectures-agentcore](https://github.com/aws-samples/sample-ai-agent-architectures-agentcore), extended to add **Datadog observability** (RUM, APM, and LLM/Agent Observability) on top of each AWS architecture pattern. See [Datadog Observability](#datadog-observability-this-fork) below for what was added and known issues.
 
 ## Datadog Observability (this fork)
 
@@ -155,7 +155,16 @@ Parameters:
     NoEcho: true
 ```
 
-The macro requires each instrumented function's `FunctionName` to be a **literal string**, not a `!Sub`/intrinsic expression (it needs the concrete name to wire up log subscriptions). Then build and deploy with the key passed as a parameter override:
+The macro requires each instrumented function's `FunctionName` to be a **literal string**, not a `!Sub`/intrinsic expression (it needs the concrete name to wire up log subscriptions).
+
+> **Gotcha with multiple functions in one template (iteration-3)**: setting a per-function service name via `Metadata: {DatadogServerless: {service: ...}}` on each `AWS::Serverless::Function` resource did **not** actually set `DD_SERVICE` (verified with `aws lambda get-function-configuration` — it was simply absent). The reliable fix is to set `DD_SERVICE` as a plain `Environment.Variables` entry directly on each function instead:
+> ```yaml
+>       Environment:
+>         Variables:
+>           DD_SERVICE: agentcore-iteration-<N>-chat   # set directly per function; don't rely on Metadata.service
+> ```
+
+Then build and deploy with the key passed as a parameter override:
 
 ```bash
 cd iteration-<N>
@@ -309,7 +318,7 @@ Browser → Amazon API Gateway → AWS Lambda (Chat) → Amazon Bedrock AgentCor
 - Amazon Bedrock AgentCore Memory for conversation persistence
 - Amazon DynamoDB for conversation metadata (names)
 - Auto-generated conversation names
-- **Datadog**: not yet instrumented in this fork — planned next, reusing the iteration-2 patterns (Serverless Macro for both Lambdas, manual trace propagation into the agent)
+- **Datadog**: RUM+Logs on the frontend, Lambda APM via the Datadog Serverless Macro on both Lambdas, APM + LLM Observability on the agent, with trace correlation across the chat Lambda → AgentCore call (only the `chat` Lambda calls the agent; `conversations` talks to AgentCore Memory/DynamoDB directly and doesn't need it)
 
 [View Iteration 3 →](./iteration-3/)
 

@@ -1,5 +1,6 @@
 .DS_Store
 iteration-3/frontend/agent-architecture-samples.code-workspace
+CLAUDE.md
 
 # Local deployment tracking (contains account IDs/ARNs/credentials, not for commit)
 PROGRESS.md

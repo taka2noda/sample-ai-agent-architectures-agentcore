@@ -5,3 +5,4 @@ langgraph
 langgraph-checkpoint-aws
 boto3
 requests
+ddtrace

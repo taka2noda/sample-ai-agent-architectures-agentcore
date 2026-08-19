@@ -4,6 +4,9 @@ import json
 import logging
 import os
 
+from ddtrace import tracer
+from ddtrace.propagation.http import HTTPPropagator
+
 logger = logging.getLogger()
 
 AGENTCORE_RUNTIME_ARN = os.environ.get("AGENTCORE_RUNTIME_ARN", "")
@@ -27,6 +30,13 @@ def invoke_agent(message: str, session_id: str, actor_id: str) -> str:
     
     logger.info(f"Invoking agent for session {session_id}, actor {actor_id}")
     
+    # Inject the current Datadog trace context into the payload so the
+    # AgentCore-side agent can join this trace (invoke_agent_runtime is a
+    # SigV4-signed AWS API call, not HTTP, so ddtrace can't inject headers
+    # automatically - the AWS SDK call itself carries no space for them).
+    dd_trace_headers = {}
+    HTTPPropagator.inject(tracer.current_trace_context(), dd_trace_headers)
+
     client = _get_client()
     response = client.invoke_agent_runtime(
         agentRuntimeArn=AGENTCORE_RUNTIME_ARN,
@@ -34,7 +44,8 @@ def invoke_agent(message: str, session_id: str, actor_id: str) -> str:
         payload=json.dumps({
             "prompt": message,
             "session_id": session_id,
-            "actor_id": actor_id
+            "actor_id": actor_id,
+            "_datadog_trace_headers": dd_trace_headers
         })
     )
     

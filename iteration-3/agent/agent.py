@@ -1,10 +1,23 @@
-import logging
 import os
+
+from ddtrace.llmobs import LLMObs
+
+LLMObs.enable(
+    ml_app=os.environ.get("DD_LLMOBS_ML_APP_NAME", "agentcore-iteration-3-agent"),
+    api_key=os.environ.get("DD_API_KEY"),
+    site=os.environ.get("DD_SITE", "datadoghq.com"),
+    agentless_enabled=True,
+)
+
+import contextlib
+import logging
 import json
 import requests
 import boto3
 from datetime import datetime
 
+from ddtrace import tracer
+from ddtrace.propagation.http import HTTPPropagator
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from langchain_aws import ChatBedrockConverse
 from langgraph.prebuilt import create_react_agent
@@ -15,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 app = BedrockAgentCoreApp()
 
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
 MODEL_ID = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
 SSM_MEMORY_ID = "/agentcore/memory-id"
 SSM_CONVERSATION_TABLE = "/dynamo/conversation-table"
@@ -115,9 +128,22 @@ def invoke(payload, context=None):
     if is_new_conversation(session_id, actor_id):
         name = generate_conversation_name(message)
         save_conversation_metadata(session_id, actor_id, name)
-    
+
+    # Join the caller's (chat Lambda's) Datadog trace, if one was passed in the
+    # payload - see iteration-2 for why this needs a real span, not just an
+    # activated Context (LangGraph's Pregel runtime uses a ThreadPoolExecutor
+    # internally, and ddtrace only propagates active Spans across threads).
+    dd_trace_headers = payload.get("_datadog_trace_headers") if payload else None
+    dd_context = HTTPPropagator.extract(dd_trace_headers) if dd_trace_headers else None
+
     config = {"configurable": {"thread_id": session_id, "actor_id": actor_id}}
-    result = agent.invoke({"messages": [("human", message)]}, config=config)
+    span_ctx = (
+        tracer.start_span("agentcore.invoke", child_of=dd_context, service=os.environ.get("DD_SERVICE"), activate=True)
+        if dd_context and dd_context.trace_id
+        else contextlib.nullcontext()
+    )
+    with span_ctx:
+        result = agent.invoke({"messages": [("human", message)]}, config=config)
     
     for msg in reversed(result.get("messages", [])):
         if hasattr(msg, 'content') and msg.type == "ai":

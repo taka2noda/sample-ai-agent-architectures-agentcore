@@ -195,6 +195,18 @@ Login with your Amazon Cognito test user and send a message. The agent will:
 > - **First message slow**: Cold start for AWS Lambda + Amazon Bedrock AgentCore. Subsequent messages will be faster.
 > - **"Unable to get weather"**: The weather.gov API only works for US locations. Try asking about a US city.
 
+## Datadog Observability
+
+**Status: done.** This iteration has two Lambdas, only one of which calls the agent:
+- **RUM + Logs** on `frontend/index.html` — RUM application `agentcore-sample-iteration-3`.
+- **Agent (`agent_3`) APM + LLM/Agent Observability** via `ddtrace` + `LLMObs.enable(...)`, deployed with the same env vars as iteration-2 (`DD_LLMOBS_ML_APP_NAME`/`DD_SERVICE=agentcore-iteration-3-agent`, `DD_TRACE_LANGCHAIN_ENABLED=false`, `DD_TRACE_PROPAGATION_STYLE=datadog,tracecontext`, `DD_TRACE_SAMPLING_RULES` for `/ping` exclusion).
+- **Both Lambdas (`ChatFunction`, `ConversationsFunction`) get Lambda APM** via the Datadog Serverless Macro in `template.yaml`'s `Transform`.
+- **Trace correlation only for `ChatFunction`**: it's the only one that calls `invoke_agent_runtime`, so only its `services/agent_service.py` injects `_datadog_trace_headers` into the payload, and only `agent/agent.py`'s `invoke()` extracts/joins it. `ConversationsFunction` talks to AgentCore Memory and DynamoDB directly, not the agent, so there's no LangGraph-executing peer for it to correlate with — it still gets normal Lambda APM from the macro, just no cross-process trace join.
+
+For the generic step-by-step and full code snippets, see the root [README.md → Datadog Setup Steps](../README.md#datadog-setup-steps).
+
+**Gotcha specific to having two Lambdas in one template**: setting a per-function Datadog service name via `Metadata: {DatadogServerless: {service: ...}}` on each `AWS::Serverless::Function` did **not** actually set `DD_SERVICE` (confirmed with `aws lambda get-function-configuration` — the variable was simply absent). Fixed by setting `DD_SERVICE` directly as a plain `Environment.Variables` entry on each function instead — see `template.yaml`.
+
 ## Cleanup
 
 ```bash

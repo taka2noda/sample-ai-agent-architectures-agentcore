@@ -177,6 +177,28 @@ Open http://localhost:8000 and login with `<YOUR_USERNAME_HERE>` / `<YOUR_PASSWO
 > - **401 Unauthorized**: Token expired or invalid. Try logging out and back in.
 > - **CORS errors**: Ensure you're using `http://localhost:8000` (not 127.0.0.1).
 
+## Datadog Observability
+
+**Status: done.** Same pattern as iteration-0:
+- **RUM + Logs** on `frontend/index.html` — RUM application `agentcore-sample-iteration-1`.
+- **APM + LLM/Agent Observability** on the agent (`agent_1`) via `ddtrace` + `LLMObs.enable(...)`:
+  ```bash
+  agentcore deploy \
+    --env "DD_API_KEY=${DD_API_KEY}" \
+    --env "DD_SITE=datadoghq.com" \
+    --env "DD_LLMOBS_ML_APP_NAME=agentcore-iteration-1-agent" \
+    --env "DD_ENV=sandbox" \
+    --env "DD_SERVICE=agentcore-iteration-1-agent" \
+    --env "DD_TRACE_LANGCHAIN_ENABLED=false"
+  ```
+  `DD_TRACE_LANGCHAIN_ENABLED=false` is required — see [dd-trace-py#18561](https://github.com/DataDog/dd-trace-py/issues/18561) in the root README's "Known issues / gotchas".
+
+For the generic step-by-step (creating the RUM app, the exact `agent.py` code snippet, etc.), see the root [README.md → Datadog Setup Steps](../README.md#datadog-setup-steps).
+
+**Not yet done / optional follow-up**: the `GET /ping` noise-suppression sampling rule (`DD_TRACE_SAMPLING_RULES`, confirmed working on iterations 2 and 3) hasn't been added here. No Lambda in this iteration, so no cross-process trace propagation is needed.
+
+> Also see [`../iteration-1-otel/`](../iteration-1-otel/) — a separate copy of this iteration exploring whether AgentCore's own AWS-native OTel pipeline can be dual-shipped to Datadog *instead of* using `ddtrace` as done here.
+
 ## Cleanup
 
 ```bash

@@ -174,6 +174,26 @@ iteration-0/
     └── index.html        # Single-page app with Amazon Cognito auth
 ```
 
+## Datadog Observability
+
+**Status: done.** This iteration is instrumented with:
+- **RUM + Logs** on `frontend/index.html` — RUM application `agentcore-sample-iteration-0`.
+- **APM + LLM/Agent Observability** on the agent (`agent_0`) via `ddtrace` + `LLMObs.enable(...)`, deployed with:
+  ```bash
+  agentcore deploy \
+    --env "DD_API_KEY=${DD_API_KEY}" \
+    --env "DD_SITE=datadoghq.com" \
+    --env "DD_LLMOBS_ML_APP_NAME=agentcore-iteration-0-agent" \
+    --env "DD_ENV=sandbox" \
+    --env "DD_SERVICE=agentcore-iteration-0-agent" \
+    --env "DD_TRACE_LANGCHAIN_ENABLED=false"
+  ```
+  `DD_TRACE_LANGCHAIN_ENABLED=false` is required — see [dd-trace-py#18561](https://github.com/DataDog/dd-trace-py/issues/18561) in the root README's "Known issues / gotchas".
+
+For the generic step-by-step (creating the RUM app, the exact `agent.py` code snippet, etc.), see the root [README.md → Datadog Setup Steps](../README.md#datadog-setup-steps).
+
+**Not yet done / optional follow-up**: `DD_TRACE_SAMPLING_RULES=[{"resource": "GET /ping", "sample_rate": 0}]` (to drop AgentCore's own health-check noise from APM) is applied and confirmed working on iterations 2 and 3, but hasn't been added here yet. Since this iteration has no Lambda, there's also no cross-process trace propagation to set up.
+
 ## Cleanup
 
 ```bash

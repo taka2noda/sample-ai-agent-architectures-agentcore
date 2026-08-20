@@ -167,6 +167,32 @@ Open http://localhost:8000 and login with `<YOUR_USERNAME_HERE>` / `<YOUR_PASSWO
 > - **500 Internal Server Error**: Check AWS Lambda logs in Amazon CloudWatch. Common cause is missing IAM permissions.
 > - **401 Unauthorized**: Token expired. Log out and back in.
 
+## Datadog Observability
+
+**Status: done.** This iteration adds a Lambda, so it's instrumented for both the agent and the Lambda:
+- **RUM + Logs** on `frontend/index.html` — RUM application `agentcore-sample-iteration-2`.
+- **Agent (`agent_2`) APM + LLM/Agent Observability** via `ddtrace` + `LLMObs.enable(...)`, deployed with:
+  ```bash
+  agentcore deploy \
+    --env "DD_API_KEY=${DD_API_KEY}" \
+    --env "DD_SITE=datadoghq.com" \
+    --env "DD_LLMOBS_ML_APP_NAME=agentcore-iteration-2-agent" \
+    --env "DD_ENV=sandbox" \
+    --env "DD_SERVICE=agentcore-iteration-2-agent" \
+    --env "DD_TRACE_LANGCHAIN_ENABLED=false" \
+    --env "DD_TRACE_PROPAGATION_STYLE=datadog,tracecontext" \
+    --env 'DD_TRACE_SAMPLING_RULES=[{"resource": "GET /ping", "sample_rate": 0}]'
+  ```
+- **Lambda (`ChatFunction`) APM** via the [Datadog Serverless Macro](https://docs.datadoghq.com/serverless/libraries_integrations/macro/) added to `template.yaml`'s `Transform` (see that file), deployed via `sam deploy --parameter-overrides ... "DatadogApiKey=${DD_API_KEY}"`.
+- **Trace correlation across the Lambda → agent call**: `lambda/services/agent_service.py` (actually `lambda/app.py`/its service module) injects the current Datadog trace context into the `invoke_agent_runtime` payload as `_datadog_trace_headers`; `agent/agent.py` extracts it and opens a real child span (`tracer.start_span(child_of=..., activate=True)`) before calling the LangGraph agent, wrapped with `contextlib.nullcontext()` for the no-context case. Verified: the Lambda's `aws.lambda` span and the agent's `agentcore.invoke` span land under the same trace_id.
+
+For the generic step-by-step and the full code snippets, see the root [README.md → Datadog Setup Steps](../README.md#datadog-setup-steps).
+
+**Known gotchas hit while building this** (see root README for full details):
+- A ddtrace bug ([dd-trace-py#18561](https://github.com/DataDog/dd-trace-py/issues/18561)) crashes real requests when `LLMObs.enable(...)` is combined with LangGraph tool calls — fixed with `DD_TRACE_LANGCHAIN_ENABLED=false` (do **not** also disable `DD_TRACE_LANGGRAPH_ENABLED`, that breaks trace structure instead of just fixing the crash).
+- `tracer.context_provider.activate()` alone is not enough to propagate trace context into the agent's LangGraph execution — you need a real child span (`tracer.start_span(child_of=..., activate=True)`), because LangGraph's Pregel runtime runs nodes via `concurrent.futures.ThreadPoolExecutor` and ddtrace only propagates active Spans across threads, not bare Contexts.
+- This account's shared IAM "Roles per account" quota can be hit when deploying new Lambda execution roles — check `aws iam list-roles` count before deploying if you're in a busy/shared AWS account.
+
 ## Cleanup
 
 ```bash

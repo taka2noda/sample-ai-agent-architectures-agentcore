@@ -322,6 +322,14 @@ Browser → Amazon API Gateway → AWS Lambda (Chat) → Amazon Bedrock AgentCor
 
 [View Iteration 3 →](./iteration-3/)
 
+### Iteration 1 (OTel variant): Dual-shipping to AWS CloudWatch/X-Ray *and* Datadog via OpenTelemetry
+
+**Best for**: Answering "can we send telemetry to both AWS and Datadog via OTel instead of Datadog's native tracer?"
+
+A copy of iteration-1 (doesn't touch its deployed agent) exploring whether AgentCore's own OTel-based observability pipeline can be extended to also ship to Datadog. Short answer: there's no existing in-process pipeline to extend (confirmed empirically — no in-process `TracerProvider`, no local OTLP collector), but genuine dual-ship works by having the app own its own OpenTelemetry SDK setup and fan out to two independent, collector-less direct-OTLP endpoints (AWS X-Ray's and Datadog's). See that folder's README for the full investigation, the working code pattern, and gotchas.
+
+[View Iteration 1 (OTel variant) →](./iteration-1-otel/)
+
 ## Prerequisites
 
 - AWS CLI configured with credentials (`aws configure`)

@@ -189,13 +189,12 @@ Open http://localhost:8000 and login with `<YOUR_USERNAME_HERE>` / `<YOUR_PASSWO
     --env "DD_LLMOBS_ML_APP_NAME=agentcore-iteration-1-agent" \
     --env "DD_ENV=sandbox" \
     --env "DD_SERVICE=agentcore-iteration-1-agent" \
-    --env "DD_TRACE_LANGCHAIN_ENABLED=false"
+    --env "DD_TRACE_LANGCHAIN_ENABLED=false" \
+    --env 'DD_TRACE_SAMPLING_RULES=[{"resource": "GET /ping", "sample_rate": 0}]'
   ```
-  `DD_TRACE_LANGCHAIN_ENABLED=false` is required — see [dd-trace-py#18561](https://github.com/DataDog/dd-trace-py/issues/18561) in the root README's "Known issues / gotchas".
+  `DD_TRACE_LANGCHAIN_ENABLED=false` is required — see [dd-trace-py#18561](https://github.com/DataDog/dd-trace-py/issues/18561) in the root README's "Known issues / gotchas". `DD_TRACE_SAMPLING_RULES` drops AgentCore's own `GET /ping` health-check noise from APM. No Lambda in this iteration, so no cross-process trace propagation is needed.
 
 For the generic step-by-step (creating the RUM app, the exact `agent.py` code snippet, etc.), see the root [README.md → Datadog Setup Steps](../README.md#datadog-setup-steps).
-
-**Not yet done / optional follow-up**: the `GET /ping` noise-suppression sampling rule (`DD_TRACE_SAMPLING_RULES`, confirmed working on iterations 2 and 3) hasn't been added here. No Lambda in this iteration, so no cross-process trace propagation is needed.
 
 > Also see [`../iteration-1-otel/`](../iteration-1-otel/) — a separate copy of this iteration exploring whether AgentCore's own AWS-native OTel pipeline can be dual-shipped to Datadog *instead of* using `ddtrace` as done here.
 

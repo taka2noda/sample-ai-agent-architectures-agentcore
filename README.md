@@ -6,6 +6,135 @@
 
 > **これはフォークです**。元は [aws-samples/sample-ai-agent-architectures-agentcore](https://github.com/aws-samples/sample-ai-agent-architectures-agentcore) で、各AWSアーキテクチャパターンの上に **Datadogによるオブザーバビリティ**(RUM、APM、LLM/Agent Observability)を追加しています。追加した内容と既知の問題については、下記の [Datadog Observability](#datadog-observability-this-fork) を参照してください。
 
+## このリポジトリの使い方
+
+このリポジトリは、最もシンプル(だが最も安全性が低い)なパターンから始めて、セキュリティと機能のレイヤーを段階的に追加していく順番で読み進めることを想定しています。
+
+**推奨の進め方:**
+
+1. **Iteration 0から始めて**、Amazon Bedrock AgentCoreとAmazon Cognito OAuth認証の基本を理解します。エージェントを最速で動かせる方法ですが、エージェントがブラウザに直接露出します。
+
+```mermaid
+flowchart LR
+    subgraph AWS["AWS"]
+        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
+    end
+    Client(["🖥️ Client<br/>(ブラウザ)"])
+
+    Client -- "OAuth (Amazon Cognito JWT)" --> Agent
+
+    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
+    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
+
+    Client -. 計装 .-> RUM
+    Agent -. 計装 .-> APM
+
+    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
+    style APM fill:#632CA6,stroke:#632CA6,color:#fff
+```
+
+2. **Iteration 1に進み**、エージェントの前段にAmazon API Gatewayを追加します。AWS WAFによるレート制限が加わりますが、セキュリティ上のギャップが残ります: ユーザーが取得するJWTはAPIとエージェントの両方に対して直接使えてしまいます。
+
+```mermaid
+flowchart LR
+    Client(["🖥️ Client<br/>(ブラウザ)"])
+    WAF["AWS WAF"]
+    APIGW["Amazon API Gateway"]
+    subgraph AWS["AWS"]
+        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
+    end
+
+    Client --> WAF --> APIGW -- "OAuth JWTパススルー" --> Agent
+    Client -. "同じJWTで直接呼び出しも可能<br/>(このイテレーションのセキュリティ上の課題)" .-> Agent
+
+    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
+    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
+
+    Client -. 計装 .-> RUM
+    Agent -. 計装 .-> APM
+
+    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
+    style APM fill:#632CA6,stroke:#632CA6,color:#fff
+```
+
+3. **Iteration 2に進み**、IAM認証に切り替えることでこのセキュリティ上のギャップを修正します。ユーザーはAmazon Cognitoを使ってAmazon API Gatewayに認証しますが、AWS LambdaはIAMクレデンシャルを使ってエージェントを呼び出します。ユーザーはAPIを迂回できなくなります。
+
+```mermaid
+flowchart LR
+    Client(["🖥️ Client<br/>(ブラウザ)"])
+    Cognito["Amazon Cognito"]
+    subgraph AWS["AWS"]
+        WAF["AWS WAF"]
+        APIGW["Amazon API Gateway"]
+        Lambda["AWS Lambda"]
+        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
+        Down["Downstream components<br/>(MCP gateways, memory, RAGなど)"]
+    end
+
+    Client --> Cognito
+    Client --> WAF --> APIGW -- "IAM auth" --> Lambda -- "IAM auth" --> Agent --> Down
+
+    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
+    LambdaAPM["🐶 Datadog Lambda APM<br/>設定箇所: template.yaml (Serverless Macro)"]
+    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
+    Corr["🐶 トレース連携<br/>設定箇所: lambda/app.py ⇄ agent/agent.py<br/>(SigV4呼び出しのためコンテキストをpayloadで受け渡し)"]
+
+    Client -. 計装 .-> RUM
+    Lambda -. 計装 .-> LambdaAPM
+    Agent -. 計装 .-> APM
+    Lambda -.-> Corr
+    Corr -.-> Agent
+
+    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
+    style LambdaAPM fill:#632CA6,stroke:#632CA6,color:#fff
+    style APM fill:#632CA6,stroke:#632CA6,color:#fff
+    style Corr fill:#632CA6,stroke:#632CA6,color:#fff
+```
+
+4. **Iteration 3で仕上げ**、Amazon Bedrock AgentCore MemoryとAmazon DynamoDBを使って会話の永続化を追加し、フル機能のチャット体験にします。
+
+```mermaid
+flowchart LR
+    Client(["🖥️ Client<br/>(ブラウザ)"])
+    subgraph AWS["AWS"]
+        WAF["AWS WAF"]
+        APIGW["Amazon API Gateway"]
+        LambdaChat["AWS Lambda (chat)"]
+        LambdaConv["AWS Lambda (conversations)"]
+        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
+        Memory["Amazon Bedrock AgentCore Memory"]
+        Dynamo["Amazon DynamoDB"]
+    end
+
+    Client --> WAF --> APIGW
+    APIGW -- "/api/chat" --> LambdaChat --> Agent
+    APIGW -- "/api/conversations" --> LambdaConv --> Memory
+    Agent --> Memory
+    Memory --> Dynamo
+    LambdaConv --> Dynamo
+
+    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
+    LambdaAPM["🐶 Datadog Lambda APM (2関数)<br/>設定箇所: template.yaml (Serverless Macro)"]
+    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
+    Corr["🐶 トレース連携 (chat Lambda→Agentのみ)<br/>設定箇所: functions/chat/services/agent_service.py ⇄ agent/agent.py"]
+
+    Client -. 計装 .-> RUM
+    LambdaChat -. 計装 .-> LambdaAPM
+    LambdaConv -. 計装 .-> LambdaAPM
+    Agent -. 計装 .-> APM
+    LambdaChat -.-> Corr
+    Corr -.-> Agent
+
+    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
+    style LambdaAPM fill:#632CA6,stroke:#632CA6,color:#fff
+    style APM fill:#632CA6,stroke:#632CA6,color:#fff
+    style Corr fill:#632CA6,stroke:#632CA6,color:#fff
+```
+
+トレードオフをすでに理解している場合は、任意のイテレーションに直接進んでも構いません。あるいは特定のイテレーションを自分のプロジェクトの出発点として使うこともできます。
+
+> **注記**: Iteration 0でデプロイするAmazon Cognitoスタックは全イテレーションで共有されるため、デプロイは一度だけで済みます。
+
 ## <a id="datadog-observability-this-fork"></a>Datadog設定(このフォークでの追加)
 
 各イテレーションは、AWSアーキテクチャに加えてDatadog向けの計装がされています。パターンはイテレーションごとに共通です: まずアプリを動かし、その後にDatadogを重ねて追加します(フロントエンドのRUM、エージェント側のAPM/LLM Observability、Lambdaが存在する場合はLambdaのAPM)。
@@ -223,135 +352,6 @@ with span_ctx:
 - **LangGraph + ddtraceのクラッシュ**: LangGraphのツールを使うエージェントで `LLMObs.enable(...)` を有効にすると、ツールが実行された瞬間に(トレーシングだけでなく)実際のリクエストがクラッシュすることがあります。これはddtraceのバグ([dd-trace-py#18561](https://github.com/DataDog/dd-trace-py/issues/18561))が原因で、JSONシリアライズ不可能なオブジェクトがスパンのメタデータに漏れ込むためです。回避策: エージェントに `DD_TRACE_LANGCHAIN_ENABLED=false` を設定する(`DD_TRACE_LANGGRAPH_ENABLED` も一緒に無効化しては**いけません** — それもクラッシュを避けられますが、トレースのワークフロー構造が失われてしまいます)。
 - **AgentCore自身のOTelベースのObservabilityとDatadogのddtraceは、互いに独立して並行動作します** — `agentcore deploy` はすべてのエージェントに対して、AWSネイティブなOTelパイプライン(X-Ray / CloudWatch GenAI Observability Dashboard)を自動で有効化します。ddtraceはこれを検知し、明示的にそれを使わない(代わりに自身のネイティブな計装にフォールバックする)ため、2つは別々の連携しないトレースを生成します。両方が実際にライブデータを受信していること(単に「設定されている」だけでないこと)を `aws xray get-trace-summaries`/`batch-get-traces` で確認済みです。
 - **AgentCore CLIは`@aws/agentcore`への移行に伴い非推奨化されています**: 本リポジトリ(およびこのフォークの計装)は `bedrock-agentcore-starter-toolkit`(`pip install bedrock-agentcore`)を使用しており、コマンド実行ごとに非推奨の通知が表示されます。`AGENTCORE_SUPPRESS_RECOMMENDATION=1` を設定すると抑制できます。
-
-## このリポジトリの使い方
-
-このリポジトリは、最もシンプル(だが最も安全性が低い)なパターンから始めて、セキュリティと機能のレイヤーを段階的に追加していく順番で読み進めることを想定しています。
-
-**推奨の進め方:**
-
-1. **Iteration 0から始めて**、Amazon Bedrock AgentCoreとAmazon Cognito OAuth認証の基本を理解します。エージェントを最速で動かせる方法ですが、エージェントがブラウザに直接露出します。
-
-```mermaid
-flowchart LR
-    subgraph AWS["AWS"]
-        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
-    end
-    Client(["🖥️ Client<br/>(ブラウザ)"])
-
-    Client -- "OAuth (Amazon Cognito JWT)" --> Agent
-
-    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
-    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
-
-    Client -. 計装 .-> RUM
-    Agent -. 計装 .-> APM
-
-    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
-    style APM fill:#632CA6,stroke:#632CA6,color:#fff
-```
-
-2. **Iteration 1に進み**、エージェントの前段にAmazon API Gatewayを追加します。AWS WAFによるレート制限が加わりますが、セキュリティ上のギャップが残ります: ユーザーが取得するJWTはAPIとエージェントの両方に対して直接使えてしまいます。
-
-```mermaid
-flowchart LR
-    Client(["🖥️ Client<br/>(ブラウザ)"])
-    WAF["AWS WAF"]
-    APIGW["Amazon API Gateway"]
-    subgraph AWS["AWS"]
-        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
-    end
-
-    Client --> WAF --> APIGW -- "OAuth JWTパススルー" --> Agent
-    Client -. "同じJWTで直接呼び出しも可能<br/>(このイテレーションのセキュリティ上の課題)" .-> Agent
-
-    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
-    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
-
-    Client -. 計装 .-> RUM
-    Agent -. 計装 .-> APM
-
-    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
-    style APM fill:#632CA6,stroke:#632CA6,color:#fff
-```
-
-3. **Iteration 2に進み**、IAM認証に切り替えることでこのセキュリティ上のギャップを修正します。ユーザーはAmazon Cognitoを使ってAmazon API Gatewayに認証しますが、AWS LambdaはIAMクレデンシャルを使ってエージェントを呼び出します。ユーザーはAPIを迂回できなくなります。
-
-```mermaid
-flowchart LR
-    Client(["🖥️ Client<br/>(ブラウザ)"])
-    Cognito["Amazon Cognito"]
-    subgraph AWS["AWS"]
-        WAF["AWS WAF"]
-        APIGW["Amazon API Gateway"]
-        Lambda["AWS Lambda"]
-        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
-        Down["Downstream components<br/>(MCP gateways, memory, RAGなど)"]
-    end
-
-    Client --> Cognito
-    Client --> WAF --> APIGW -- "IAM auth" --> Lambda -- "IAM auth" --> Agent --> Down
-
-    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
-    LambdaAPM["🐶 Datadog Lambda APM<br/>設定箇所: template.yaml (Serverless Macro)"]
-    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
-    Corr["🐶 トレース連携<br/>設定箇所: lambda/app.py ⇄ agent/agent.py<br/>(SigV4呼び出しのためコンテキストをpayloadで受け渡し)"]
-
-    Client -. 計装 .-> RUM
-    Lambda -. 計装 .-> LambdaAPM
-    Agent -. 計装 .-> APM
-    Lambda -.-> Corr
-    Corr -.-> Agent
-
-    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
-    style LambdaAPM fill:#632CA6,stroke:#632CA6,color:#fff
-    style APM fill:#632CA6,stroke:#632CA6,color:#fff
-    style Corr fill:#632CA6,stroke:#632CA6,color:#fff
-```
-
-4. **Iteration 3で仕上げ**、Amazon Bedrock AgentCore MemoryとAmazon DynamoDBを使って会話の永続化を追加し、フル機能のチャット体験にします。
-
-```mermaid
-flowchart LR
-    Client(["🖥️ Client<br/>(ブラウザ)"])
-    subgraph AWS["AWS"]
-        WAF["AWS WAF"]
-        APIGW["Amazon API Gateway"]
-        LambdaChat["AWS Lambda (chat)"]
-        LambdaConv["AWS Lambda (conversations)"]
-        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
-        Memory["Amazon Bedrock AgentCore Memory"]
-        Dynamo["Amazon DynamoDB"]
-    end
-
-    Client --> WAF --> APIGW
-    APIGW -- "/api/chat" --> LambdaChat --> Agent
-    APIGW -- "/api/conversations" --> LambdaConv --> Memory
-    Agent --> Memory
-    Memory --> Dynamo
-    LambdaConv --> Dynamo
-
-    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
-    LambdaAPM["🐶 Datadog Lambda APM (2関数)<br/>設定箇所: template.yaml (Serverless Macro)"]
-    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
-    Corr["🐶 トレース連携 (chat Lambda→Agentのみ)<br/>設定箇所: functions/chat/app.py ⇄ agent/agent.py"]
-
-    Client -. 計装 .-> RUM
-    LambdaChat -. 計装 .-> LambdaAPM
-    LambdaConv -. 計装 .-> LambdaAPM
-    Agent -. 計装 .-> APM
-    LambdaChat -.-> Corr
-    Corr -.-> Agent
-
-    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
-    style LambdaAPM fill:#632CA6,stroke:#632CA6,color:#fff
-    style APM fill:#632CA6,stroke:#632CA6,color:#fff
-    style Corr fill:#632CA6,stroke:#632CA6,color:#fff
-```
-
-トレードオフをすでに理解している場合は、任意のイテレーションに直接進んでも構いません。あるいは特定のイテレーションを自分のプロジェクトの出発点として使うこともできます。
-
-> **注記**: Iteration 0でデプロイするAmazon Cognitoスタックは全イテレーションで共有されるため、デプロイは一度だけで済みます。
 
 ## イテレーション一覧
 

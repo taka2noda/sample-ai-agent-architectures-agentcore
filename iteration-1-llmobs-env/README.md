@@ -1,90 +1,121 @@
-# Iteration 1 (LLMObs env-only variant): enabling ddtrace/LLM Observability without touching agent.py
+# Iteration 1 (LLMObs env-only variant): `agent.py` に一切手を加えずに ddtrace/LLM Observability を有効化する
 
-This is a copy of [iteration-1](../iteration-1/) (Browser → Amazon API Gateway → Amazon Bedrock AgentCore Runtime, OAuth pass-through) used to answer a specific question: **can Datadog APM + LLM Observability be turned on for the AgentCore agent process without adding any `ddtrace`/`LLMObs` code to `agent.py`?**
+`agent.py`に`ddtrace`/`LLMObs`関連のコードを一切追加せず、`direct_code_deploy`のAgentCoreエージェントでDatadog APM + LLM Observabilityを有効化できるかを検証したバリアント。
 
-It does not touch iteration-1's own deployed agent (`agent_1`) — this uses a separate agent name (`agent_1_llmobs_env`) so both can coexist. **This has been deployed and verified end-to-end** (see "What we verified" below).
+## Overview
 
-## TL;DR answer
+- 実証するDatadog機能: APM + LLM/Agent Observability(アプリコード変更なし、環境変数+`sitecustomize.py`のみ)
+- 技術スタック: Amazon Bedrock AgentCore Runtime(`deployment_type: direct_code_deploy`)上のLangGraphエージェント(Python)
 
-**Yes.** `agent/agent.py` in this directory is byte-for-byte the plain, non-instrumented agent — no `import ddtrace`, no `LLMObs.enable(...)` call. Enabling is done entirely via:
+これは [iteration-1](../iteration-1/)(Browser → Amazon API Gateway → Amazon Bedrock AgentCore Runtime、OAuthパススルー)のコピーで、次の問いに答えるために作成した検証用ディレクトリです: **`agent.py` に `ddtrace`/`LLMObs` 関連のコードを一切追加せずに、AgentCoreのエージェントプロセスでDatadog APM + LLM Observabilityを有効化できるか?**
 
-1. A `sitecustomize.py` file dropped next to `agent.py` containing one line: `import ddtrace.auto`.
-2. One extra environment variable, `PYTHONPATH=.`, plus the usual `DD_*` config vars — no code, no Dockerfile.
+iteration-1本体の実際にデプロイ済みのエージェント(`agent_1`)には一切手を加えていません — 別のエージェント名(`agent_1_llmobs_env`)を使っており、両者は共存できます。**実際にデプロイしてエンドツーエンドで動作確認済みです**(詳細は「Verify in Datadog」を参照)。
 
-## Two approaches that looked promising but don't work here
+**結論**: **できます。** このディレクトリの `agent/agent.py` は、`import ddtrace` も `LLMObs.enable(...)` の呼び出しも一切ない、素のエージェントコードそのままです。有効化は次の2点のみで完結しています:
 
-This iteration uses `deployment_type: direct_code_deploy` (per iteration-1's README) — AgentCore zips the source and runs it directly on a managed runtime, **there is no Dockerfile/container involved at all**. That ruled out two ideas before landing on the one that works:
+1. `agent.py` の隣に置いた `sitecustomize.py`(1行だけ: `import ddtrace.auto`)
+2. 追加の環境変数 `PYTHONPATH=.` + 通常の `DD_*` 系設定変数 — コード変更もDockerfileも不要
 
-1. **Prepend `ddtrace-run` to the container's Dockerfile `CMD`.** This only applies to `deployment_type: container`. For `direct_code_deploy`, the toolkit builds an `entryPoint` array (e.g. `["agent.py"]`, or `["opentelemetry-instrument", "agent.py"]` when AWS's own OTel observability is enabled) that's passed directly to the `CreateAgentRuntime`/`UpdateAgentRuntime` API's `agentRuntimeArtifact.codeConfiguration.entryPoint` field — there's no Dockerfile to edit. (Confirmed this *does* work for `deployment_type: container` — see [`../iteration-1-container-ddtrace-run/`](../iteration-1-container-ddtrace-run/), a separate deployed-and-verified variant that tests exactly this.)
-2. **Call `UpdateAgentRuntime` directly (bypassing the `agentcore` CLI) to set `entryPoint: ["ddtrace-run", "agent.py"]`.** This field is a plain API parameter, so it seemed like it should work the same way `["opentelemetry-instrument", "agent.py"]` does (which we confirmed *is* accepted). It isn't: the API rejects any wrapper other than `opentelemetry-instrument` with `ValidationException: Invalid entrypoint value...`, i.e. that first token appears to be allow-listed rather than genuinely arbitrary. Confirmed by testing directly against the deployed `agent_1_llmobs_env` runtime via boto3.
+## Architecture
 
-## What actually works: `sitecustomize.py` + `PYTHONPATH`
+```mermaid
+flowchart LR
+    Client(["🖥️ Client<br/>(ブラウザ)"])
+    WAF["AWS WAF"]
+    APIGW["Amazon API Gateway"]
 
-CPython's `site` module auto-imports a module named `sitecustomize` at interpreter startup if one is found on `sys.path` — but only if it's reachable via `PYTHONPATH`/`site-packages`, **not** merely by sitting in the script's own directory (verified empirically: a `sitecustomize.py` next to a script, run as `python script.py` with no `PYTHONPATH`, is never imported; the same file with `PYTHONPATH=.` set *is* imported).
+    subgraph Runtime["Amazon Bedrock AgentCore Runtime<br/>(deployment_type: direct_code_deploy)"]
+        direction TB
+        Sitecustomize["🐶 sitecustomize.py<br/>(import ddtrace.auto)"]
+        AgentPy["agent.py<br/>ddtrace/LLMObs関連コードなし"]
+        Sitecustomize -. "起動時にPythonが自動import<br/>(env: PYTHONPATH=.)" .-> AgentPy
+    end
 
-So:
-- `agent/sitecustomize.py` — the only new file, one line: `import ddtrace.auto  # noqa: F401`. `ddtrace.auto` runs the exact same bootstrap (`ddtrace/bootstrap/sitecustomize.py` → `ddtrace/bootstrap/preload.py`) as `ddtrace-run` does, including auto-starting the LLMObs "product" (`ddtrace/llmobs/_product.py`) when `DD_LLMOBS_ENABLED=1` is set — it isn't limited to APM tracing.
-- `PYTHONPATH=.` — passed as an `--env` var at deploy time. Since `entryPoint` is the relative path `agent.py` and the managed runtime's cwd is the code root, `.` resolves to that same directory, making `sitecustomize.py` importable.
+    Client --> WAF --> APIGW --> Runtime
 
-`agent.py` itself needed zero changes — it's identical to a version of the agent with no Datadog instrumentation whatsoever.
+    DD["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/sitecustomize.py の1行 +<br/>agentcore deploy --env の環境変数<br/>(DD_LLMOBS_ENABLED, DD_LLMOBS_ML_APP,<br/>DD_LLMOBS_AGENTLESS_ENABLED, PYTHONPATH=. など)"]
+    Runtime -. 計装 .-> DD
 
-## Environment variables (replaces the old `LLMObs.enable(...)` kwargs)
-
-```bash
-agentcore deploy \
-  --env "DD_API_KEY=${DD_API_KEY}" \
-  --env "DD_SITE=datadoghq.com" \
-  --env "DD_ENV=sandbox" \
-  --env "DD_SERVICE=agentcore-iteration-1-llmobs-env-agent" \
-  --env "DD_LLMOBS_ENABLED=1" \
-  --env "DD_LLMOBS_ML_APP=agentcore-iteration-1-llmobs-env-agent" \
-  --env "DD_LLMOBS_AGENTLESS_ENABLED=1" \
-  --env "DD_TRACE_LANGCHAIN_ENABLED=false" \
-  --env "PYTHONPATH=." \
-  --env 'DD_TRACE_SAMPLING_RULES=[{"resource": "GET /ping", "sample_rate": 0}]'
+    style Sitecustomize fill:#632CA6,stroke:#632CA6,color:#fff
+    style DD fill:#632CA6,stroke:#632CA6,color:#fff
 ```
 
-Mapping from the old code-based call:
+`agent/agent.py` そのものにはDatadog関連の変更が一切なく、Datadogの設定は上図で強調した2箇所(`sitecustomize.py`というファイルの追加、`agentcore deploy`時の環境変数)だけで完結します。
 
-| `LLMObs.enable(...)` kwarg | Equivalent env var |
-|---|---|
-| `ml_app=...` | `DD_LLMOBS_ML_APP` |
-| `api_key=...` | `DD_API_KEY` |
-| `site=...` | `DD_SITE` |
-| `agentless_enabled=True` | `DD_LLMOBS_AGENTLESS_ENABLED=1` |
-| *(the call itself)* | `DD_LLMOBS_ENABLED=1` + `sitecustomize.py` (`import ddtrace.auto`) + `PYTHONPATH=.` |
+## Datadog設定
 
-`DD_TRACE_LANGCHAIN_ENABLED=false` is still required — same `ddtrace`+LangGraph crash workaround as iteration-1 (see the root README's "Known issues / gotchas"). `DD_TRACE_SAMPLING_RULES` drops AgentCore's own `GET /ping` health-check noise from APM, same as iteration-1.
+- 有効化している機能: APM + LLM/Agent Observability(エージェント側のみ。RUM/Lambdaはこの検証の対象外)
+- 関連ファイル:
+  - `agent/sitecustomize.py` — 追加した唯一の新規ファイル。中身は1行だけ: `import ddtrace.auto  # noqa: F401`。`ddtrace.auto` は `ddtrace-run` と全く同じブートストラップ処理(`ddtrace/bootstrap/sitecustomize.py` → `ddtrace/bootstrap/preload.py`)を実行し、`DD_LLMOBS_ENABLED=1` が設定されていればLLMObsの「product」(`ddtrace/llmobs/_product.py`)も自動起動します — APMトレーシングだけに限定された仕組みではありません。
+  - `agent/agent.py` — 変更なし(素のエージェントコード)
+- 必要な環境変数 / APIキー(旧`LLMObs.enable(...)`のkwargsの置き換え):
+  ```bash
+  agentcore deploy \
+    --env "DD_API_KEY=${DD_API_KEY}" \
+    --env "DD_SITE=datadoghq.com" \
+    --env "DD_ENV=sandbox" \
+    --env "DD_SERVICE=agentcore-iteration-1-llmobs-env-agent" \
+    --env "DD_LLMOBS_ENABLED=1" \
+    --env "DD_LLMOBS_ML_APP=agentcore-iteration-1-llmobs-env-agent" \
+    --env "DD_LLMOBS_AGENTLESS_ENABLED=1" \
+    --env "DD_TRACE_LANGCHAIN_ENABLED=false" \
+    --env "PYTHONPATH=." \
+    --env 'DD_TRACE_SAMPLING_RULES=[{"resource": "GET /ping", "sample_rate": 0}]'
+  ```
+  `PYTHONPATH=.` — `entryPoint` は相対パス `agent.py` であり、マネージドランタイムの起動時cwdはコードのルートディレクトリなので、`.` はそのディレクトリを指し、`sitecustomize.py` がimport可能になります。
 
-## What we verified
+  旧コードベースの呼び出しとの対応:
 
-Deployed `agent_1_llmobs_env` to the shared sandbox account/region (us-west-2, same shared Cognito stack as iteration-1) with the env vars above, then invoked it with a real Cognito JWT (`agentcore invoke --bearer-token ...`):
+  | `LLMObs.enable(...)` のkwarg | 対応する環境変数 |
+  |---|---|
+  | `ml_app=...` | `DD_LLMOBS_ML_APP` |
+  | `api_key=...` | `DD_API_KEY` |
+  | `site=...` | `DD_SITE` |
+  | `agentless_enabled=True` | `DD_LLMOBS_AGENTLESS_ENABLED=1` |
+  | *(呼び出し自体)* | `DD_LLMOBS_ENABLED=1` + `sitecustomize.py`(`import ddtrace.auto`) + `PYTHONPATH=.` |
 
-- **CloudWatch logs** for the invocation show `ddtrace/llmobs/_integrations/langgraph.py` actively instrumenting the LangGraph call (a `LangChainDeprecationWarning` raised *from inside* that ddtrace file is proof the integration patched LangChain's `BaseChatModel`) — despite `agent.py` never importing `ddtrace`.
-- **Datadog APM** shows the full trace for the invocation: a `starlette.request` root span (`POST /invocations`) plus LLM Observability spans `langgraph.graph.state.CompiledStateGraph.LangGraph` → `RunnableSeq.call_model` → `RunnableSeq.tools` → `RunnableSeq.call_model`, tagged `service:agentcore-iteration-1-llmobs-env-agent`, `env:sandbox`, `ingestion_reason:auto`, with `llmobs_trace_id`/`llmobs_parent_id` correlating the LLM Observability spans to the APM trace.
+  `DD_TRACE_LANGCHAIN_ENABLED=false` は依然として必須です — iteration-1と同じ `ddtrace`+LangGraphのクラッシュ回避策です(ルートREADMEの「既知の問題・落とし穴」参照)。`DD_TRACE_SAMPLING_RULES` はAgentCore自身の `GET /ping` ヘルスチェックのノイズをAPMから除外するもので、こちらもiteration-1と同様です。
 
-This confirms the approach works end-to-end, not just in theory.
+## Prerequisites
 
-## Setup
+[iteration-1](../iteration-1/README.md)と同じ(共有 `agentcore-cognito` スタック、テストユーザー) — 手順はそちらのREADMEを参照してください。
 
-Follows the same deployment shape as [iteration-1](../iteration-1/README.md) (shared Cognito stack, OAuth pass-through, API Gateway + WAF), with these differences:
+## Setup / How to Run
 
-1. **Prerequisites**: same as iteration-1 (shared `agentcore-cognito` stack, test user) — see that iteration's README for those steps.
-2. **Configure and deploy the agent** — same `agentcore configure` flow as iteration-1 (`direct_code_deploy`, `PYTHON_3_11`, OAuth authorizer pointed at the same Cognito pool), but use a distinct agent name (`agent_1_llmobs_env`) so you don't collide with an already-deployed `agent_1`. `agent/sitecustomize.py` is packaged automatically since it's just another file in the source directory.
-3. **Deploy** with `agentcore deploy` and the env vars listed above (including `PYTHONPATH=.`) — no Dockerfile step, no entrypoint override needed.
-4. **API Gateway + frontend**: identical to iteration-1 — deploy `api-gateway.yaml` with the new agent's Runtime ID, update `frontend/index.html`'s `CONFIG`. RUM instrumentation on `frontend/index.html` is unchanged/untouched by this experiment — it's only exploring the agent-process side. (Not deployed as part of this validation pass — verification above used `agentcore invoke` directly against the Runtime with a Cognito JWT, which is sufficient to prove the mechanism.)
-5. **Test**: invoke the agent (via `agentcore invoke --bearer-token <cognito-id-token>` or the frontend), then check Datadog APM + LLM Observability for the resulting trace under the `agentcore-iteration-1-llmobs-env-agent` service name.
+[iteration-1](../iteration-1/README.md)と同じ構成(共有Cognitoスタック、OAuthパススルー、API Gateway + WAF)に従いますが、以下が異なります:
 
-## Caveats
+1. **エージェントの設定・デプロイ** — iteration-1と同じ `agentcore configure` フロー(`direct_code_deploy`、`PYTHON_3_11`、同じCognitoプールを指すOAuth authorizer)ですが、既にデプロイ済みの `agent_1` と衝突しないよう、別名の `agent_1_llmobs_env` を使用します。`agent/sitecustomize.py` はソースディレクトリ内の単なる1ファイルなので、特別な手順なしで自動的にパッケージングされます。
+2. **デプロイ**: 上記の環境変数を指定して `agentcore deploy` を実行するだけ — Dockerfileの編集もentryPointの上書きも不要です。
+3. **API Gateway + フロントエンド**: iteration-1と同一 — 新しいエージェントのRuntime IDで `api-gateway.yaml` をデプロイし、`frontend/index.html` の `CONFIG` を更新します。`frontend/index.html` のRUM計装は本検証では変更・未使用です(エージェントプロセス側のみが検証対象)。(今回の検証では未デプロイ — 検証は `agentcore invoke` でRuntimeに直接Cognito JWTを渡す形で行い、メカニズムの確認には十分でした。)
+4. **テスト**: エージェントを呼び出します(`agentcore invoke --bearer-token <cognitoのIDトークン>` またはフロントエンド経由)。
 
-- This only removes the *LLMObs/ddtrace enable call* from application code. It doesn't change anything about how LangChain/LangGraph or `botocore` get instrumented — that's still `ddtrace`'s automatic patching, same as iteration-1, just triggered by `ddtrace.auto` (via `sitecustomize.py`) instead of an explicit `LLMObs.enable()` call.
-- Depends on `direct_code_deploy`'s cwd being the code root at process start (so `PYTHONPATH=.` resolves correctly) — this is an observed behavior of the current AgentCore managed runtime, not a documented contract; worth re-verifying if AWS changes how `direct_code_deploy` processes are launched.
-- The `entryPoint` allow-list behavior (only `opentelemetry-instrument` accepted as a wrapper) is also an observed, undocumented API behavior — noted here in case it changes and makes the `ddtrace-run`-via-`entryPoint` approach viable later.
+## Verify in Datadog
+
+共有サンドボックスアカウント/リージョン(us-west-2、iteration-1と同じ共有Cognitoスタック)に `agent_1_llmobs_env` をデプロイし、上記の環境変数を渡した上で、実際のCognito JWTを使って呼び出しました(`agentcore invoke --bearer-token ...`):
+
+- **CloudWatchログ**: 呼び出し時のログに `ddtrace/llmobs/_integrations/langgraph.py` が実際にLangGraph呼び出しを計装していることを示す出力(そのddtraceファイルの内部から発生した `LangChainDeprecationWarning` は、LangChainの `BaseChatModel` へのpatchが実際に効いている証拠)。`agent.py` は一度も `ddtrace` をimportしていないにもかかわらず、です。
+- **Datadog APM**: `agentcore-iteration-1-llmobs-env-agent` サービス名でAPM Trace Explorerを検索すると、呼び出しの完全なトレースが `service:agentcore-iteration-1-llmobs-env-agent`、`env:sandbox`、`ingestion_reason:auto` のタグ付きで着弾していることを確認できます。`starlette.request` のルートスパン(`POST /invocations`)に加え、`langgraph.graph.state.CompiledStateGraph.LangGraph` → `RunnableSeq.call_model` → `RunnableSeq.tools` → `RunnableSeq.call_model` というLLM Observabilityのスパン群があり、`llmobs_trace_id`/`llmobs_parent_id` によってAPMトレースとLLM Observabilityスパンが相関付けられていることも確認済みです。
+
+理論上の話ではなく、実際にエンドツーエンドで動作することを確認済みです。
 
 ## Cleanup
 
 ```bash
-aws cloudformation delete-stack --stack-name agentcore-api   # if you deployed API Gateway for this
+aws cloudformation delete-stack --stack-name agentcore-api   # このために API Gateway をデプロイした場合
 cd agent && agentcore destroy
-# Don't delete the shared Cognito stack if other iterations still use it
+# 他のイテレーションが使っている共有Cognitoスタックは削除しないこと
 ```
+
+## Notes
+
+**有望に見えたが機能しなかった2つのアプローチ**: このイテレーションは(iteration-1のREADMEにある通り)`deployment_type: direct_code_deploy` を使っています — AgentCoreがソースコードをzipして、マネージドランタイム上でそのまま直接実行する方式で、**Dockerfile/コンテナは一切関与しません**。そのため、以下2つのアイデアはいずれも機能せず、最終的にsitecustomize方式に落ち着きました:
+
+1. **コンテナのDockerfileの`CMD`に`ddtrace-run`を前置する。** これは `deployment_type: container` のときにしか適用できません。`direct_code_deploy` の場合、ツールキットは `entryPoint` 配列(例: `["agent.py"]`、AWS自身のOTel Observabilityが有効な場合は `["opentelemetry-instrument", "agent.py"]`)を組み立てて、それを `CreateAgentRuntime`/`UpdateAgentRuntime` APIの `agentRuntimeArtifact.codeConfiguration.entryPoint` フィールドに直接渡します — 編集対象のDockerfileがそもそも存在しません。(`deployment_type: container` では実際にこの方法が機能することを別途確認済みです — この方法だけを検証した [`../iteration-1-container-ddtrace-run/`](../iteration-1-container-ddtrace-run/) を参照してください。)
+2. **`agentcore` CLIを経由せず、`UpdateAgentRuntime` APIを直接呼んで `entryPoint: ["ddtrace-run", "agent.py"]` を設定する。** このフィールドは単純なAPIパラメータなので、`["opentelemetry-instrument", "agent.py"]`(こちらは受理されることを確認済み)と同様に通ると思われました。しかし実際には通らず、`ddtrace-run`以外のラッパーはすべて `ValidationException: Invalid entrypoint value...` で拒否されます。つまり `entryPoint` の先頭トークンは任意の実行ファイルではなく、許可リスト方式のようです。実際にデプロイ済みの `agent_1_llmobs_env` ランタイムに対してboto3で直接テストして確認しました。
+
+**実際に機能した方法の技術的背景**: CPythonの `site` モジュールは、インタプリタ起動時に `sys.path` 上で見つかった `sitecustomize` という名前のモジュールを自動importしますが、これは `PYTHONPATH`/`site-packages` 経由で到達可能な場合のみで、**スクリプト自身のディレクトリに置いただけでは自動import されません**(実際に検証: `PYTHONPATH` を設定せずに `python script.py` として実行した場合、スクリプトと同じディレクトリの `sitecustomize.py` は一度もimportされない。同じファイルでも `PYTHONPATH=.` を設定した場合はimportされる)。
+
+**留意点**:
+- ここで取り除いたのは*LLMObs/ddtraceの有効化呼び出し*だけです。LangChain/LangGraphや`botocore`がどのように計装されるかはiteration-1と変わらず、`ddtrace`の自動patchingがそのまま効いています。トリガーが明示的な `LLMObs.enable()` 呼び出しではなく `ddtrace.auto`(`sitecustomize.py`経由)になっただけです。
+- `direct_code_deploy` のプロセス起動時のcwdがコードのルートディレクトリであることに依存しています(そのおかげで `PYTHONPATH=.` が正しく解決される)。これは現行のAgentCoreマネージドランタイムで観測された挙動であり、ドキュメント化された仕様ではありません。AWSが `direct_code_deploy` プロセスの起動方法を変更した場合は再確認が必要です。
+- `entryPoint` の許可リスト的な挙動(ラッパーとして `opentelemetry-instrument` のみ受理される)も、ドキュメント化されていないAPIの観測された挙動です。将来これが変わり `entryPoint` 経由の `ddtrace-run` が使えるようになる可能性もあるため、記録として残しています。

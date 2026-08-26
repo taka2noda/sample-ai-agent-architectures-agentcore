@@ -1,30 +1,74 @@
-# Iteration 0: Direct Browser → LangGraph Agent hosted on Amazon Bedrock AgentCore Runtime + OAuth using Amazon Cognito Auth
+# Iteration 0: ブラウザから直接 → Amazon Bedrock AgentCore RuntimeでホストされるLangGraphエージェント + Amazon Cognitoを使ったOAuth認証
 
-This first pattern shows the simplest setup that most tutorials show - a static HTML page that authenticates via OAuth and calls and agent directly. This example uses Amazon Cognito as the authorizor and Amazon Bedrock AgentCore Runtime as the hosted runtime for the agent. 
+静的HTMLページからAmazon Cognito OAuthで認証し、Amazon Bedrock AgentCore Runtime上のLangGraphエージェントを直接呼び出す、最もシンプルな構成。
 
-This pattern breaks down in production, and does not account for production level concerns for a web based AI agent. The following iterations fix the gaps introduced by this direct client to agent pattern.
+## Overview
+
+- 実証するDatadog機能: RUM + Logs(フロントエンド)、APM + LLM/Agent Observability(エージェント)
+- 技術スタック: Amazon Bedrock AgentCore Runtime上のLangGraphエージェント(Python)、Amazon Cognito(OAuth)、静的HTMLフロントエンド
+
+このパターンは本番運用では崩れます。Web向けAIエージェントとして本番レベルで考慮すべき事項をカバーしていません。以降のイテレーションでは、この「クライアントからエージェントへ直結」パターンのギャップを修正していきます。
 
 ## Architecture
-![Direct client to agent architecture](../images/client_to_agent_arch.png)
 
-## Components
+```mermaid
+flowchart LR
+    subgraph AWS["AWS"]
+        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
+    end
+    Client(["🖥️ Client<br/>(ブラウザ)"])
 
-- `cognito.yaml` - AWS CloudFormation template for Amazon Cognito User Pool and IAM role (shared across all iterations)
-- `agent/` - LangGraph hello world agent with simple example tools
-- `frontend/index.html` - Single HTML file with Amazon Cognito auth and chat UI
+    Client -- "OAuth (Amazon Cognito JWT)" --> Agent
+
+    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
+    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
+
+    Client -. 計装 .-> RUM
+    Agent -. 計装 .-> APM
+
+    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
+    style APM fill:#632CA6,stroke:#632CA6,color:#fff
+```
+
+## Datadog設定
+
+- 有効化している機能: RUM + Logs(フロントエンド)、APM + LLM/Agent Observability(エージェント)
+- 関連ファイル:
+  - `frontend/index.html` — Datadog Browser SDKのRUM/Logs初期化スニペット(`<head>`の先頭)
+  - `agent/agent.py` — 最初のimportとして `ddtrace.llmobs.LLMObs.enable(...)` を呼び出し
+- 必要な環境変数 / APIキー:
+  ```bash
+  export DD_API_KEY=<あなたのDatadog APIキー>
+  export DD_APP_KEY=<あなたのDatadog Applicationキー>
+  export DD_SITE=datadoghq.com
+  ```
+  エージェント側は `agentcore deploy` 実行時に以下の環境変数を渡します(ファイルには保存されません):
+  ```bash
+  agentcore deploy \
+    --env "DD_API_KEY=${DD_API_KEY}" \
+    --env "DD_SITE=datadoghq.com" \
+    --env "DD_LLMOBS_ML_APP_NAME=agentcore-iteration-0-agent" \
+    --env "DD_ENV=sandbox" \
+    --env "DD_SERVICE=agentcore-iteration-0-agent" \
+    --env "DD_TRACE_LANGCHAIN_ENABLED=false" \
+    --env 'DD_TRACE_SAMPLING_RULES=[{"resource": "GET /ping", "sample_rate": 0}]'
+  ```
+  `DD_TRACE_LANGCHAIN_ENABLED=false` は必須です — ルートREADMEの「既知の問題・落とし穴」内の [dd-trace-py#18561](https://github.com/DataDog/dd-trace-py/issues/18561) を参照してください。`DD_TRACE_SAMPLING_RULES` はAgentCore自身の `GET /ping` ヘルスチェックのノイズをAPMから除外します。
+- RUM appの作成手順や`agent.py`の正確なコードスニペットなど、汎用的な手順はルートの [README.md → Datadogセットアップ手順](../README.md#datadog-setup-steps) を参照してください。
 
 ## Prerequisites
 
-- AWS CLI configured with credentials (`aws configure`)
-- AgentCore CLI installed (`pip install bedrock-agentcore`)
+- クレデンシャル付きで設定済みのAWS CLI(`aws configure`)
+- インストール済みのAgentCore CLI(`pip install bedrock-agentcore`)
+- `DD_API_KEY` / `DD_APP_KEY` が使えるDatadogアカウント
 
-> **Tip**: Verify your setup with `aws sts get-caller-identity` and `agentcore --version`
+> **Tip**: `aws sts get-caller-identity` と `agentcore --version` でセットアップを確認してください
 
-## Setup
+## Setup / How to Run
 
-### 1. Deploy Amazon Cognito (Shared Across All Iterations)
+### 1. Amazon Cognitoをデプロイ(全イテレーションで共有)
 
-This Amazon Cognito stack is used by all iterations. It also creates an IAM execution role for Amazon Bedrock AgentCore. Deploy it once:
+このAmazon Cognitoスタックはすべてのイテレーションで使用されます。Amazon Bedrock AgentCore用のIAM実行ロールも作成します。一度だけデプロイしてください:
 
 ```bash
 aws cloudformation deploy \
@@ -34,7 +78,7 @@ aws cloudformation deploy \
   --region us-east-1
 ```
 
-Get the outputs:
+出力値を取得します:
 ```bash
 # User Pool ID
 USER_POOL_ID=$(aws cloudformation describe-stacks \
@@ -54,7 +98,7 @@ COGNITO_DOMAIN=$(aws cloudformation describe-stacks \
   --query 'Stacks[0].Outputs[?OutputKey==`CognitoDomain`].OutputValue' \
   --output text)
 
-# Discovery URL (for agent OAuth config)
+# Discovery URL (エージェントのOAuth設定用)
 DISCOVERY_URL=$(aws cloudformation describe-stacks \
   --stack-name agentcore-cognito \
   --query 'Stacks[0].Outputs[?OutputKey==`OAuthDiscoveryUrl`].OutputValue' \
@@ -66,17 +110,17 @@ echo "Cognito Domain: $COGNITO_DOMAIN"
 echo "Discovery URL: $DISCOVERY_URL"
 ```
 
-### 2. Create a Test User
+### 2. テストユーザーを作成
 
 ```bash
-# Create user
+# ユーザーを作成
 aws cognito-idp admin-create-user \
   --user-pool-id $USER_POOL_ID \
   --username <YOUR_USERNAME_HERE> \
   --temporary-password <YOUR_TEMP_PASSWORD_HERE> \
   --message-action SUPPRESS
 
-# Set permanent password
+# 永続パスワードを設定
 aws cognito-idp admin-set-user-password \
   --user-pool-id $USER_POOL_ID \
   --username <YOUR_USERNAME_HERE> \
@@ -84,49 +128,48 @@ aws cognito-idp admin-set-user-password \
   --permanent
 ```
 
-> **Password Requirements**: Must be 8+ characters with uppercase, lowercase, numbers, and special characters 
+> **パスワード要件**: 8文字以上で、大文字・小文字・数字・特殊文字を含む必要があります
 
-### 3. Deploy the Agent
+### 3. エージェントをデプロイ
 
 ```bash
 cd agent
 agentcore configure
 ```
 
-When prompted during configuration:
+設定時のプロンプトでは以下を入力します:
 - **Entrypoint**: `agent.py`
-- **Agent name**: `agent_0` (or press Enter for default)
-- **Requirements file**: Press Enter to use detected `requirements.txt`
-- **Deployment type**: `1` (Direct Code Deploy)
-- **Python runtime**: `2` (PYTHON_3_11)
-- **Execution role**: Press Enter to auto-create
-- **S3 bucket**: Press Enter to auto-create
+- **Agent name**: `agent_0`(またはEnterでデフォルト)
+- **Requirements file**: Enterで検出された`requirements.txt`を使用
+- **Deployment type**: `1`(Direct Code Deploy)
+- **Python runtime**: `2`(PYTHON_3_11)
+- **Execution role**: Enterで自動作成
+- **S3 bucket**: Enterで自動作成
 - **Configure OAuth authorizer?**: `yes`
-- **OAuth discovery URL**: Use the `$DISCOVERY_URL` from step 1
-- **Allowed OAuth client IDs**: Leave empty (press Enter)
-- **Allowed OAuth audience**: Enter your `$CLIENT_ID` from step 1
-- **Allowed OAuth scopes**: Leave empty (press Enter)
-- **Custom claims**: Leave empty (press Enter)
+- **OAuth discovery URL**: 手順1の `$DISCOVERY_URL` を使用
+- **Allowed OAuth client IDs**: 空欄(Enter)
+- **Allowed OAuth audience**: 手順1の `$CLIENT_ID` を入力
+- **Allowed OAuth scopes**: 空欄(Enter)
+- **Custom claims**: 空欄(Enter)
 - **Request header allowlist**: `no`
-- **Memory**: `s` (skip)
+- **Memory**: `s`(スキップ)
 
-
-Then deploy:
+続けてデプロイします:
 ```bash
 agentcore deploy
 ```
 
-Note the Agent ARN from the output - you'll need it for the frontend config.
+出力からAgent ARNを控えておいてください — フロントエンドの設定で必要になります。
 
-> **Tip**: Save the Agent Runtime ARN somewhere - it looks like `arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/agent_0-AbCdEf123`
+> **Tip**: Agent Runtime ARNをどこかに保存しておいてください — 例: `arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/agent_0-AbCdEf123`
 
-### 4. Update Frontend Config
+### 4. フロントエンド設定を更新
 
-Edit `frontend/index.html` and update the CONFIG section:
+`frontend/index.html` を編集し、CONFIGセクションを更新します:
 
 ```javascript
 const CONFIG = {
-  // Remove https:// from the Cognito domain
+  // CognitoドメインからはHttps://を除く
   cognitoDomain: 'apigw-agentcore-<YOUR_ACCOUNT_ID>.auth.<YOUR_REGION>.amazoncognito.com',
   clientId: '<YOUR_CLIENT_ID>',
   redirectUri: 'http://localhost:8000',
@@ -134,72 +177,63 @@ const CONFIG = {
 };
 ```
 
-> **Important**: 
-> - `cognitoDomain` should NOT include `https://` - just the domain
-> - `clientId` comes from the Cognito stack outputs (step 1)
-> - `agentRuntimeArn` is the full ARN from `agentcore deploy` output
+> **重要**:
+> - `cognitoDomain` に `https://` を含めないこと — ドメインのみ
+> - `clientId` はCognitoスタックの出力値(手順1)から取得
+> - `agentRuntimeArn` は `agentcore deploy` の出力にある完全なARN
 
-### 5. Run Frontend
+### 5. フロントエンドを実行
 
 ```bash
 cd frontend
 python3 -m http.server 8000
 ```
 
-Open http://localhost:8000 and login with `<YOUR_USERNAME_HERE>` / `<YOUR_PASSWORD_HERE>`
+http://localhost:8000 を開き、`<YOUR_USERNAME_HERE>` / `<YOUR_PASSWORD_HERE>` でログインします
 
-> **Troubleshooting**:
-> - **"Claim 'aud' value mismatch"**: The `clientId` in your frontend CONFIG doesn't match what the agent expects. Double-check the CLIENT_ID from step 1.
-> - **Login redirects but nothing happens**: Check browser console for errors. Ensure `redirectUri` matches exactly (including trailing slash or lack thereof).
-> - **CORS errors**: Make sure you're accessing via `http://localhost:8000`, not `127.0.0.1:8000`.
+**動作の流れ**:
+1. ユーザーが「Login」をクリック → Amazon Cognito Hosted UIへリダイレクト
+2. ログイン後、Amazon Cognitoが認可コード付きでリダイレクトして戻る
+3. フロントエンドがコードをトークンに交換
+4. フロントエンドがOAuthトークン付きでAmazon Bedrock AgentCore Runtimeを呼び出す
+5. エージェントが応答
 
-## How It Works
+> **トラブルシューティング**:
+> - **"Claim 'aud' value mismatch"**: フロントエンドCONFIGの `clientId` がエージェントの期待値と一致していません。手順1のCLIENT_IDを再確認してください。
+> - **ログインはリダイレクトされるが何も起きない**: ブラウザのコンソールでエラーを確認してください。`redirectUri` が(末尾のスラッシュの有無を含め)完全に一致しているか確認してください。
+> - **CORSエラー**: `127.0.0.1:8000` ではなく `http://localhost:8000` でアクセスしていることを確認してください。
 
-1. User clicks "Login" → redirected to Amazon Cognito Hosted UI
-2. After login, Amazon Cognito redirects back with authorization code
-3. Frontend exchanges code for tokens
-4. Frontend calls Amazon Bedrock AgentCore Runtime with the OAuth token
-5. Agent responds
+## Verify in Datadog
 
-## Files
-
-```
-iteration-0/
-├── README.md
-├── cognito.yaml          # Amazon Cognito User Pool (shared across iterations)
-├── agent/
-│   ├── agent.py          # LangGraph agent
-│   └── requirements.txt
-└── frontend/
-    └── index.html        # Single-page app with Amazon Cognito auth
-```
-
-## Datadog Observability
-
-**Status: done.** This iteration is instrumented with:
-- **RUM + Logs** on `frontend/index.html` — RUM application `agentcore-sample-iteration-0`.
-- **APM + LLM/Agent Observability** on the agent (`agent_0`) via `ddtrace` + `LLMObs.enable(...)`, deployed with:
-  ```bash
-  agentcore deploy \
-    --env "DD_API_KEY=${DD_API_KEY}" \
-    --env "DD_SITE=datadoghq.com" \
-    --env "DD_LLMOBS_ML_APP_NAME=agentcore-iteration-0-agent" \
-    --env "DD_ENV=sandbox" \
-    --env "DD_SERVICE=agentcore-iteration-0-agent" \
-    --env "DD_TRACE_LANGCHAIN_ENABLED=false" \
-    --env 'DD_TRACE_SAMPLING_RULES=[{"resource": "GET /ping", "sample_rate": 0}]'
-  ```
-  `DD_TRACE_LANGCHAIN_ENABLED=false` is required — see [dd-trace-py#18561](https://github.com/DataDog/dd-trace-py/issues/18561) in the root README's "Known issues / gotchas". `DD_TRACE_SAMPLING_RULES` drops AgentCore's own `GET /ping` health-check noise from APM.
-
-For the generic step-by-step (creating the RUM app, the exact `agent.py` code snippet, etc.), see the root [README.md → Datadog Setup Steps](../README.md#datadog-setup-steps).
+- **RUM** — RUM Application `agentcore-sample-iteration-0` の Sessions/Session Replay 画面で、フロントエンドでのログイン〜チャット操作がセッションとして記録されていることを確認します。
+- **APM + LLM Observability** — APM Trace Explorerで `service:agentcore-iteration-0-agent` を検索すると、`POST /invocations` のトレースと、その下にLangGraphのLLM呼び出しスパン(LLM Observability)が確認できます。
 
 ## Cleanup
 
 ```bash
-# Delete agent
+# エージェントを削除
 cd agent
 agentcore destroy
 
-# Delete Amazon Cognito (only if not using other iterations)
+# Amazon Cognitoを削除(他のイテレーションで使っていない場合のみ)
 aws cloudformation delete-stack --stack-name agentcore-cognito
+```
+
+## Notes
+
+構成要素:
+- `cognito.yaml` - Amazon Cognito User PoolとIAMロール用のAWS CloudFormationテンプレート(全イテレーションで共有)
+- `agent/` - シンプルなツールを持つLangGraphの hello world エージェント
+- `frontend/index.html` - Amazon Cognito認証とチャットUIを持つ単一HTMLファイル
+
+ファイル構成:
+```
+iteration-0/
+├── README.md
+├── cognito.yaml          # Amazon Cognito User Pool(全イテレーションで共有)
+├── agent/
+│   ├── agent.py          # LangGraphエージェント
+│   └── requirements.txt
+└── frontend/
+    └── index.html        # Amazon Cognito認証付きの単一ページアプリ
 ```

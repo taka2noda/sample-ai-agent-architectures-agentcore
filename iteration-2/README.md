@@ -1,25 +1,81 @@
-# Iteration 2: Amazon API Gateway → AWS Lambda → Amazon Bedrock AgentCore (IAM Auth)
+# Iteration 2: Amazon API Gateway → AWS Lambda → Amazon Bedrock AgentCore(IAM認証)
 
-This iteration adds a thin AWS Lambda layer between Amazon API Gateway and Amazon Bedrock AgentCore Runtime.
-The AWS Lambda uses IAM to call the agent - users can't bypass the API layer.
+Amazon API GatewayとAmazon Bedrock AgentCore Runtimeの間に薄いAWS Lambda層を追加し、LambdaがIAMでエージェントを呼び出すことでAPI層の迂回を防ぐ構成。
+
+## Overview
+
+- 実証するDatadog機能: RUM + Logs(フロントエンド)、Lambda APM(Serverless Macro)、APM + LLM/Agent Observability(エージェント)、Lambda → エージェント間のトレース連携
+- 技術スタック: Amazon Bedrock AgentCore Runtime上のLangGraphエージェント(Python)、AWS Lambda、Amazon API Gateway、AWS WAF、Amazon Cognito
+
+**このイテレーションでの変更点**: Iteration 1には目立たないセキュリティ上のギャップがあります: ユーザーが受け取るJWTは、Amazon API Gatewayとエージェントランタイム自体の両方で直接使えてしまいます。悪意のあるユーザーがエージェントのエンドポイントを何らかの方法で知っていれば、APIを迂回してエージェントを直接呼び出すことができてしまいます。
+
+Iteration 2はこれを次の方法で修正します:
+- **AWS Lambda層**: リクエスト処理・ログ出力・将来の拡張のためのコンピュートを追加
+- **エージェント側のIAM認証**: エージェントはOAuthではなくIAMを使用 — ユーザーは直接呼び出せない
+- **Amazon API Gateway側のAmazon Cognito**: JWT検証はAmazon API Gatewayレベルのみで行う
 
 ## Architecture
 
-![IAM integration with AgentCore Runtime](../images/iteration_2.png)
+```mermaid
+flowchart LR
+    Client(["🖥️ Client<br/>(ブラウザ)"])
+    Cognito["Amazon Cognito"]
+    subgraph AWS["AWS"]
+        WAF["AWS WAF"]
+        APIGW["Amazon API Gateway"]
+        Lambda["AWS Lambda"]
+        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
+        Down["Downstream components<br/>(MCP gateways, memory, RAGなど)"]
+    end
 
+    Client --> Cognito
+    Client --> WAF --> APIGW -- "IAM auth" --> Lambda -- "IAM auth" --> Agent --> Down
 
-## What is different with this iteration?
+    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
+    LambdaAPM["🐶 Datadog Lambda APM<br/>設定箇所: template.yaml (Serverless Macro)"]
+    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
+    Corr["🐶 トレース連携<br/>設定箇所: lambda/app.py ⇄ agent/agent.py<br/>(SigV4呼び出しのためコンテキストをpayloadで受け渡し)"]
 
-Iteration 1 has a subtle security gap: the user gets a JWT that works for both the Amazon API Gateway AND the agent runtime directly. A malicious user could bypass your API and call the agent directly if the actor somehow knew the agent endpoint.
+    Client -. 計装 .-> RUM
+    Lambda -. 計装 .-> LambdaAPM
+    Agent -. 計装 .-> APM
+    Lambda -.-> Corr
+    Corr -.-> Agent
 
-Iteration 2 fixes this by:
-- **AWS Lambda Layer**: Adds compute for request processing, logging, and future extensibility
-- **IAM Auth on Agent**: Agent uses IAM instead of OAuth - users can't call it directly
-- **Amazon Cognito on Amazon API Gateway**: JWT validation happens at the Amazon API Gateway level only
+    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
+    style LambdaAPM fill:#632CA6,stroke:#632CA6,color:#fff
+    style APM fill:#632CA6,stroke:#632CA6,color:#fff
+    style Corr fill:#632CA6,stroke:#632CA6,color:#fff
+```
+
+## Datadog設定
+
+- 有効化している機能: RUM + Logs(フロントエンド)、Lambda APM(`ChatFunction`)、APM + LLM/Agent Observability(エージェント)、Lambda → エージェント呼び出しを越えたトレース連携
+- 関連ファイル:
+  - `frontend/index.html` — RUM application `agentcore-sample-iteration-2` の初期化スニペット
+  - `agent/agent.py` — `ddtrace.llmobs.LLMObs.enable(...)` を最初のimportとして呼び出し
+  - `template.yaml` — `Transform` に追加した [Datadog Serverless Macro](https://docs.datadoghq.com/serverless/libraries_integrations/macro/)
+  - `lambda/services/agent_service.py`(実体は`lambda/app.py`/そのサービスモジュール) ⇄ `agent/agent.py` — トレースコンテキストの手動inject/extract
+- 必要な環境変数 / APIキー:
+  - エージェント(`agentcore deploy`実行時):
+    ```bash
+    agentcore deploy \
+      --env "DD_API_KEY=${DD_API_KEY}" \
+      --env "DD_SITE=datadoghq.com" \
+      --env "DD_LLMOBS_ML_APP_NAME=agentcore-iteration-2-agent" \
+      --env "DD_ENV=sandbox" \
+      --env "DD_SERVICE=agentcore-iteration-2-agent" \
+      --env "DD_TRACE_LANGCHAIN_ENABLED=false" \
+      --env "DD_TRACE_PROPAGATION_STYLE=datadog,tracecontext" \
+      --env 'DD_TRACE_SAMPLING_RULES=[{"resource": "GET /ping", "sample_rate": 0}]'
+    ```
+  - Lambda(`sam deploy`実行時): `--parameter-overrides ... "DatadogApiKey=${DD_API_KEY}"`
+- Lambda → エージェント呼び出しを越えたトレース連携: `lambda/services/agent_service.py` が、現在のDatadogトレースコンテキストを `invoke_agent_runtime` のペイロードに `_datadog_trace_headers` としてinjectします。`agent/agent.py` はそれをextractし、LangGraphエージェントを呼び出す前に本物の子スパン(`tracer.start_span(child_of=..., activate=True)`)を開きます(コンテキストがない場合は `contextlib.nullcontext()` でラップ)。LambdaのAWSトレース(`aws.lambda`スパン)とエージェントの`agentcore.invoke`スパンが同一trace_idの下に着弾することを確認済みです。
+- 汎用的な手順と完全なコードスニペットについては、ルートの [README.md → Datadogセットアップ手順](../README.md#datadog-setup-steps) を参照してください。
 
 ## Prerequisites
 
-**Amazon Cognito and IAM role must be deployed first** (from iteration-0):
+**Amazon CognitoとIAMロールを先にデプロイしておく必要があります**(iteration-0から):
 
 ```bash
 cd ../iteration-0
@@ -30,9 +86,9 @@ aws cloudformation deploy \
   --region us-east-1
 ```
 
-> **Note**: If you already deployed Amazon Cognito for a previous iteration, skip this step.
+> **注記**: 前のイテレーションで既にAmazon Cognitoをデプロイ済みの場合はこの手順をスキップしてください。
 
-Get the execution role ARN:
+実行ロールのARNを取得します:
 ```bash
 EXECUTION_ROLE_ARN=$(aws cloudformation describe-stacks \
   --stack-name agentcore-cognito \
@@ -41,60 +97,43 @@ EXECUTION_ROLE_ARN=$(aws cloudformation describe-stacks \
 echo "Execution Role ARN: $EXECUTION_ROLE_ARN"
 ```
 
-> **Save this ARN** - you'll need it when configuring the agent.
+> **このARNを保存してください** — エージェントの設定時に必要になります。
 
-Also need:
-- AWS SAM CLI installed ([installation guide](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html))
-- Test user created (see iteration-0 README)
+また以下も必要です:
+- インストール済みのAWS SAM CLI([インストールガイド](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html))
+- 作成済みのテストユーザー(iteration-0のREADMEを参照)
 
-## Project Structure
+## Setup / How to Run
 
-```
-iteration-2/
-├── README.md
-├── template.yaml            # AWS SAM template
-├── samconfig.toml
-├── agent/
-│   ├── agent.py             # LangGraph agent (IAM auth)
-│   └── requirements.txt
-├── lambda/
-│   ├── app.py               # AWS Lambda handler
-│   └── requirements.txt
-└── frontend/
-    └── index.html           # Single-page chat UI
-```
-
-## Deployment
-
-### 1. Deploy Agent with IAM Auth
+### 1. IAM認証付きでエージェントをデプロイ
 
 ```bash
 cd agent
 agentcore configure
 ```
 
-When prompted during configuration:
+設定時のプロンプトでは以下を入力します:
 - **Entrypoint**: `agent.py`
-- **Agent name**: `agent_2` (or press Enter for default)
-- **Requirements file**: Press Enter to use detected `requirements.txt`
-- **Deployment type**: `1` (Direct Code Deploy)
-- **Python runtime**: `2` (PYTHON_3_11)
-- **Execution role**: Paste the `$EXECUTION_ROLE_ARN` from prerequisites
-- **S3 bucket**: Press Enter to auto-create
-- **Configure OAuth authorizer?**: `no` (we use IAM auth for iteration-2)
+- **Agent name**: `agent_2`(またはEnterでデフォルト)
+- **Requirements file**: Enterで検出された`requirements.txt`を使用
+- **Deployment type**: `1`(Direct Code Deploy)
+- **Python runtime**: `2`(PYTHON_3_11)
+- **Execution role**: 前提条件で取得した `$EXECUTION_ROLE_ARN` を貼り付け
+- **S3 bucket**: Enterで自動作成
+- **Configure OAuth authorizer?**: `no`(iteration-2ではIAM認証を使用)
 - **Request header allowlist**: `no`
-- **Memory**: `s` (skip - no memory for iteration-2)
+- **Memory**: `s`(スキップ — iteration-2ではMemoryは使わない)
 
-> **Important**: Iteration-2 uses IAM authentication (not OAuth). The AWS Lambda calls the agent using its IAM role, so users can't bypass the API to call the agent directly.
+> **重要**: Iteration-2はIAM認証を使用します(OAuthではありません)。AWS LambdaがそのIAMロールを使ってエージェントを呼び出すため、ユーザーはAPIを迂回してエージェントを直接呼び出すことができません。
 
-Then deploy:
+続けてデプロイします:
 ```bash
 agentcore deploy
 ```
 
-Note the Agent ARN from the output.
+出力からAgent ARNを控えておいてください。
 
-### 2. Get Amazon Cognito ARN
+### 2. Amazon CognitoのARNを取得
 
 ```bash
 COGNITO_ARN=$(aws cloudformation describe-stacks \
@@ -104,29 +143,29 @@ COGNITO_ARN=$(aws cloudformation describe-stacks \
 echo "Cognito ARN: $COGNITO_ARN"
 ```
 
-### 3. Deploy AWS Lambda + Amazon API Gateway
+### 3. AWS Lambda + Amazon API Gatewayをデプロイ
 
-From the iteration-2 directory:
+iteration-2のディレクトリから:
 
 ```bash
-cd ..  # Back to iteration-2 root (if still in agent/)
+cd ..  # iteration-2のルートへ戻る(まだagent/にいる場合)
 
-# Build and deploy
+# ビルドしてデプロイ
 sam build
 sam deploy --parameter-overrides \
   "AgentCoreRuntimeArn=arn:aws:bedrock-agentcore:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:runtime/<YOUR_AGENT_RUNTIME_ID>" \
   "CognitoUserPoolArn=arn:aws:cognito-idp:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:userpool/<YOUR_USER_POOL_ID>"
 ```
 
-> **Tip**: Copy the full Agent ARN directly from the `agentcore deploy` output to avoid typos.
+> **Tip**: タイプミスを避けるため、完全なAgent ARNは `agentcore deploy` の出力から直接コピーしてください。
 
-> **If deployment fails with ROLLBACK_COMPLETE**: The stack is in a failed state. Delete it first:
+> **ROLLBACK_COMPLETEでデプロイが失敗する場合**: スタックが失敗状態になっています。まず削除してください:
 > ```bash
 > aws cloudformation delete-stack --stack-name iteration2
-> # Wait for deletion, then retry sam deploy
+> # 削除完了を待ってから sam deploy を再実行
 > ```
 
-Get the Amazon API Gateway endpoint from the outputs:
+出力からAmazon API Gatewayのエンドポイントを取得します:
 ```bash
 API_ENDPOINT=$(aws cloudformation describe-stacks \
   --stack-name iteration2 \
@@ -135,63 +174,44 @@ API_ENDPOINT=$(aws cloudformation describe-stacks \
 echo "API Endpoint: $API_ENDPOINT"
 ```
 
-### 4. Update Frontend Config
+### 4. フロントエンド設定を更新
 
-Edit `frontend/index.html` and update the CONFIG section with your values.
+`frontend/index.html` を編集し、CONFIGセクションに値を設定します。
 
-> **Quick way to get all values**:
+> **すべての値を素早く取得する方法**:
 > ```bash
-> # Cognito domain (remove https:// prefix when using)
+> # Cognitoドメイン(使用時はhttps://プレフィックスを除く)
 > aws cloudformation describe-stacks --stack-name agentcore-cognito \
 >   --query 'Stacks[0].Outputs[?OutputKey==`CognitoDomain`].OutputValue' --output text
-> 
+>
 > # Client ID
 > aws cloudformation describe-stacks --stack-name agentcore-cognito \
 >   --query 'Stacks[0].Outputs[?OutputKey==`UserPoolClientId`].OutputValue' --output text
-> 
+>
 > # API Endpoint
 > aws cloudformation describe-stacks --stack-name iteration2 \
 >   --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' --output text
 > ```
 
-### 5. Test
+### 5. テスト
 
 ```bash
 cd frontend
 python3 -m http.server 8000
 ```
 
-Open http://localhost:8000 and login with `<YOUR_USERNAME_HERE>` / `<YOUR_PASSWORD_HERE>`
+http://localhost:8000 を開き、`<YOUR_USERNAME_HERE>` / `<YOUR_PASSWORD_HERE>` でログインします
 
-> **Troubleshooting**:
-> - **500 Internal Server Error**: Check AWS Lambda logs in Amazon CloudWatch. Common cause is missing IAM permissions.
-> - **401 Unauthorized**: Token expired. Log out and back in.
+> **トラブルシューティング**:
+> - **500 Internal Server Error**: Amazon CloudWatchでAWS Lambdaのログを確認してください。よくある原因はIAM権限の不足です。
+> - **401 Unauthorized**: トークンが期限切れです。ログアウトして再度ログインしてください。
 
-## Datadog Observability
+## Verify in Datadog
 
-**Status: done.** This iteration adds a Lambda, so it's instrumented for both the agent and the Lambda:
-- **RUM + Logs** on `frontend/index.html` — RUM application `agentcore-sample-iteration-2`.
-- **Agent (`agent_2`) APM + LLM/Agent Observability** via `ddtrace` + `LLMObs.enable(...)`, deployed with:
-  ```bash
-  agentcore deploy \
-    --env "DD_API_KEY=${DD_API_KEY}" \
-    --env "DD_SITE=datadoghq.com" \
-    --env "DD_LLMOBS_ML_APP_NAME=agentcore-iteration-2-agent" \
-    --env "DD_ENV=sandbox" \
-    --env "DD_SERVICE=agentcore-iteration-2-agent" \
-    --env "DD_TRACE_LANGCHAIN_ENABLED=false" \
-    --env "DD_TRACE_PROPAGATION_STYLE=datadog,tracecontext" \
-    --env 'DD_TRACE_SAMPLING_RULES=[{"resource": "GET /ping", "sample_rate": 0}]'
-  ```
-- **Lambda (`ChatFunction`) APM** via the [Datadog Serverless Macro](https://docs.datadoghq.com/serverless/libraries_integrations/macro/) added to `template.yaml`'s `Transform` (see that file), deployed via `sam deploy --parameter-overrides ... "DatadogApiKey=${DD_API_KEY}"`.
-- **Trace correlation across the Lambda → agent call**: `lambda/services/agent_service.py` (actually `lambda/app.py`/its service module) injects the current Datadog trace context into the `invoke_agent_runtime` payload as `_datadog_trace_headers`; `agent/agent.py` extracts it and opens a real child span (`tracer.start_span(child_of=..., activate=True)`) before calling the LangGraph agent, wrapped with `contextlib.nullcontext()` for the no-context case. Verified: the Lambda's `aws.lambda` span and the agent's `agentcore.invoke` span land under the same trace_id.
-
-For the generic step-by-step and the full code snippets, see the root [README.md → Datadog Setup Steps](../README.md#datadog-setup-steps).
-
-**Known gotchas hit while building this** (see root README for full details):
-- A ddtrace bug ([dd-trace-py#18561](https://github.com/DataDog/dd-trace-py/issues/18561)) crashes real requests when `LLMObs.enable(...)` is combined with LangGraph tool calls — fixed with `DD_TRACE_LANGCHAIN_ENABLED=false` (do **not** also disable `DD_TRACE_LANGGRAPH_ENABLED`, that breaks trace structure instead of just fixing the crash).
-- `tracer.context_provider.activate()` alone is not enough to propagate trace context into the agent's LangGraph execution — you need a real child span (`tracer.start_span(child_of=..., activate=True)`), because LangGraph's Pregel runtime runs nodes via `concurrent.futures.ThreadPoolExecutor` and ddtrace only propagates active Spans across threads, not bare Contexts.
-- This account's shared IAM "Roles per account" quota can be hit when deploying new Lambda execution roles — check `aws iam list-roles` count before deploying if you're in a busy/shared AWS account.
+- **RUM** — RUM Application `agentcore-sample-iteration-2` のSessions画面でフロントエンド操作を確認します。
+- **Lambda APM** — APM Trace ExplorerでLambda(`ChatFunction`)のサービスのトレースを確認します。
+- **エージェントのAPM + LLM Observability** — `service:agentcore-iteration-2-agent` で検索し、LangGraphのLLM呼び出しスパンを確認します。
+- **トレース連携** — Lambdaの`aws.lambda`スパンからエージェントの`agentcore.invoke`スパンまでが同一trace_idの1本のトレースとして繋がっていることを確認します。
 
 ## Cleanup
 
@@ -199,3 +219,26 @@ For the generic step-by-step and the full code snippets, see the root [README.md
 sam delete --stack-name iteration2
 cd agent && agentcore destroy
 ```
+
+## Notes
+
+プロジェクト構成:
+```
+iteration-2/
+├── README.md
+├── template.yaml            # AWS SAMテンプレート
+├── samconfig.toml
+├── agent/
+│   ├── agent.py             # LangGraphエージェント(IAM認証)
+│   └── requirements.txt
+├── lambda/
+│   ├── app.py               # AWS Lambdaハンドラ
+│   └── requirements.txt
+└── frontend/
+    └── index.html           # 単一ページのチャットUI
+```
+
+構築時に遭遇した既知の落とし穴(詳細はルートREADMEを参照):
+- `LLMObs.enable(...)` とLangGraphのツール呼び出しを組み合わせると、ddtraceのバグ([dd-trace-py#18561](https://github.com/DataDog/dd-trace-py/issues/18561))で実際のリクエストがクラッシュします — `DD_TRACE_LANGCHAIN_ENABLED=false` で修正(`DD_TRACE_LANGGRAPH_ENABLED` も一緒に無効化しては**いけません**。それはクラッシュを直さずトレース構造を壊してしまいます)。
+- `tracer.context_provider.activate()` だけでは、エージェントのLangGraph実行にトレースコンテキストを伝播するのに不十分です — 本物の子スパン(`tracer.start_span(child_of=..., activate=True)`)が必要です。LangGraphのPregelランタイムは `concurrent.futures.ThreadPoolExecutor` でノードを実行し、ddtraceはスレッド間でアクティブなSpanしか伝播せず、素のContextは伝播しないためです。
+- このアカウントで共有されているIAMの「アカウントあたりのロール数」クォータは、新しいLambda実行ロールをデプロイする際に到達することがあります — 混雑した/共有のAWSアカウントを使っている場合は、デプロイ前に `aws iam list-roles` の件数を確認してください。

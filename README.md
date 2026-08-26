@@ -1,35 +1,35 @@
-## Overview
+## 概要
 
-This repository contains different architectural patterns for deploying AI agents on AWS using Amazon Bedrock AgentCore Runtime. Each iteration builds on the previous, showing a progression from simple to production-ready.
+このリポジトリは、Amazon Bedrock AgentCore Runtimeを使ってAWS上にAIエージェントをデプロイするための、複数のアーキテクチャパターンを収録しています。各イテレーションは前のイテレーションを土台に、シンプルな構成から本番運用向けの構成へと段階的に発展させています。
 
-All agents included are simple prototypes using LangGraph but could be extended for different use cases. The focus of this is the surrounding architectural components, not the agent functionality itself.
+含まれるエージェントはすべてLangGraphを使ったシンプルなプロトタイプですが、様々な用途に拡張可能です。本リポジトリの主眼はエージェント自体の機能ではなく、それを取り囲むアーキテクチャ構成要素です。
 
-> **This is a fork** of [aws-samples/sample-ai-agent-architectures-agentcore](https://github.com/aws-samples/sample-ai-agent-architectures-agentcore), extended to add **Datadog observability** (RUM, APM, and LLM/Agent Observability) on top of each AWS architecture pattern. See [Datadog Observability](#datadog-observability-this-fork) below for what was added and known issues.
+> **これはフォークです**。元は [aws-samples/sample-ai-agent-architectures-agentcore](https://github.com/aws-samples/sample-ai-agent-architectures-agentcore) で、各AWSアーキテクチャパターンの上に **Datadogによるオブザーバビリティ**(RUM、APM、LLM/Agent Observability)を追加しています。追加した内容と既知の問題については、下記の [Datadog Observability](#datadog-observability-this-fork) を参照してください。
 
-## Datadog Observability (this fork)
+## <a id="datadog-observability-this-fork"></a>Datadog設定(このフォークでの追加)
 
-Each iteration is instrumented for Datadog in addition to its AWS architecture, following a consistent per-iteration pattern: get the app working first, then add Datadog on top of it (frontend RUM, agent-side APM/LLM Observability, and Lambda APM where a Lambda is present).
+各イテレーションは、AWSアーキテクチャに加えてDatadog向けの計装がされています。パターンはイテレーションごとに共通です: まずアプリを動かし、その後にDatadogを重ねて追加します(フロントエンドのRUM、エージェント側のAPM/LLM Observability、Lambdaが存在する場合はLambdaのAPM)。
 
-- **RUM + Logs** — added to every iteration's `frontend/index.html` via the Datadog Browser SDK. Requires a Datadog RUM Application (`applicationId` + `clientToken`) per iteration/environment.
-- **APM + LLM/Agent Observability (the AgentCore agent)** — `ddtrace` + `ddtrace.llmobs.LLMObs.enable(agentless_enabled=True)` added as the first import in each `agent/agent.py`, configured via environment variables passed with `agentcore deploy --env KEY=VALUE` (not stored in any file): `DD_API_KEY`, `DD_SITE`, `DD_LLMOBS_ML_APP_NAME`, `DD_ENV`, `DD_SERVICE`, `DD_TRACE_LANGCHAIN_ENABLED=false`.
-- **Lambda APM (iteration-2 and 3)** — instrumented via the [Datadog Serverless Macro](https://docs.datadoghq.com/serverless/libraries_integrations/macro/) added to each `template.yaml`'s `Transform` section, rather than manually wiring the Datadog Lambda layer/extension.
-- **Trace correlation across the Lambda → AgentCore boundary** — `invoke_agent_runtime` is a SigV4-signed AWS SDK call, not HTTP, so Datadog can't propagate trace context automatically. `iteration-2/lambda/app.py` and `iteration-2/agent/agent.py` manually inject/extract the trace context through the JSON payload, and the agent opens a real child span (`tracer.start_span(child_of=..., activate=True)`) before invoking the LangGraph agent — a bare `tracer.context_provider.activate()` is *not* sufficient, because LangGraph's Pregel runtime executes nodes via `concurrent.futures.ThreadPoolExecutor`, and ddtrace's cross-thread propagation only carries an active Span, not a span-less remote Context.
+- **RUM + Logs** — 各イテレーションの `frontend/index.html` に、Datadog Browser SDKで追加。イテレーション/環境ごとにDatadog RUM Application(`applicationId` + `clientToken`)が必要です。
+- **APM + LLM/Agent Observability(AgentCoreエージェント側)** — 各 `agent/agent.py` の最初のimportとして `ddtrace` + `ddtrace.llmobs.LLMObs.enable(agentless_enabled=True)` を追加。設定は(どのファイルにも保存せず)`agentcore deploy --env KEY=VALUE` で渡す環境変数経由: `DD_API_KEY`、`DD_SITE`、`DD_LLMOBS_ML_APP_NAME`、`DD_ENV`、`DD_SERVICE`、`DD_TRACE_LANGCHAIN_ENABLED=false`。
+- **Lambda APM(iteration-2、iteration-3)** — Datadog Lambda layer/extensionを手動で組み込む代わりに、各 `template.yaml` の `Transform` セクションに [Datadog Serverless Macro](https://docs.datadoghq.com/serverless/libraries_integrations/macro/) を追加して計装。
+- **Lambda → AgentCore境界を越えたトレース連携** — `invoke_agent_runtime` はHTTPではなくSigV4署名付きのAWS SDK呼び出しのため、Datadogはトレースコンテキストを自動伝播できません。`iteration-2/lambda/app.py` と `iteration-2/agent/agent.py` は、JSONペイロード経由でトレースコンテキストを手動でinject/extractし、エージェント側はLangGraphエージェントを呼び出す前に本物の子スパン(`tracer.start_span(child_of=..., activate=True)`)を開きます — 単なる `tracer.context_provider.activate()` では*不十分*です。LangGraphのPregelランタイムは `concurrent.futures.ThreadPoolExecutor` でノードを実行し、ddtraceのスレッド間伝播はアクティブなSpanしか運ばず、スパンを持たないremote Contextは運ばないためです。
 
-### Datadog Setup Steps
+### <a id="datadog-setup-steps"></a>Datadogセットアップ手順
 
-Do this **after** the AWS side of an iteration is deployed and working (see [Getting Started](#getting-started) and that iteration's own README). Repeat per iteration — `<N>` below is the iteration number (`0`, `1`, `2`, ...).
+これは、あるイテレーションのAWS側がデプロイ済みで動作していることを確認した**後**に行ってください([はじめに](#getting-started)とそのイテレーション自身のREADMEを参照)。イテレーションごとに繰り返します — 以下の `<N>` はイテレーション番号(`0`、`1`、`2`、...)です。
 
-**0. Prerequisites**
+**0. 前提条件**
 
 ```bash
-export DD_API_KEY=<your Datadog API key>
-export DD_APP_KEY=<your Datadog Application key>
-export DD_SITE=datadoghq.com   # or your org's site, e.g. us5.datadoghq.com
+export DD_API_KEY=<あなたのDatadog APIキー>
+export DD_APP_KEY=<あなたのDatadog Applicationキー>
+export DD_SITE=datadoghq.com   # または自分の組織のsite、例: us5.datadoghq.com
 ```
 
-**1. RUM + Logs (frontend)**
+**1. RUM + Logs(フロントエンド)**
 
-Create a RUM Browser Application (there's no dedicated CLI for this — use the API directly):
+RUM Browser Applicationを作成します(専用CLIはないため、APIを直接使用):
 
 ```bash
 curl -s -X POST "https://api.${DD_SITE}/api/v2/rum/applications" \
@@ -44,7 +44,7 @@ curl -s -X POST "https://api.${DD_SITE}/api/v2/rum/applications" \
   }'
 ```
 
-Take the `applicationId` and `clientToken` from the response and add this to the very top of `iteration-<N>/frontend/index.html`'s `<head>` (before any other `<script>` tags):
+レスポンスから `applicationId` と `clientToken` を取得し、`iteration-<N>/frontend/index.html` の `<head>` の一番先頭(他の `<script>` タグより前)に追加します:
 
 ```html
 <script>
@@ -86,9 +86,9 @@ Take the `applicationId` and `clientToken` from the response and add this to the
 </script>
 ```
 
-**2. APM + LLM/Agent Observability (the AgentCore agent)**
+**2. APM + LLM/Agent Observability(AgentCoreエージェント側)**
 
-Add `ddtrace` to `iteration-<N>/agent/requirements.txt`, then in `iteration-<N>/agent/agent.py`, make `LLMObs.enable(...)` the very first thing that runs — before any other imports:
+`iteration-<N>/agent/requirements.txt` に `ddtrace` を追加し、`iteration-<N>/agent/agent.py` では `LLMObs.enable(...)` を、他のどのimportよりも前に、一番最初に実行されるようにします:
 
 ```python
 import os
@@ -102,10 +102,10 @@ LLMObs.enable(
     agentless_enabled=True,
 )
 
-# ... the rest of the original imports (json, bedrock_agentcore, langgraph, etc.) follow after this
+# ... 元のimport(json、bedrock_agentcore、langgraphなど)はこの後に続く
 ```
 
-Reinstall deps in the agent's venv, then redeploy the agent with the Datadog env vars (`agentcore deploy` persists these directly on the runtime resource — they are not written to any file):
+エージェントのvenvで依存関係を再インストールし、Datadog用の環境変数付きでエージェントを再デプロイします(`agentcore deploy` はこれらをRuntimeリソースに直接保持します — どのファイルにも書き込まれません):
 
 ```bash
 cd iteration-<N>/agent
@@ -120,11 +120,11 @@ AGENTCORE_SUPPRESS_RECOMMENDATION=1 agentcore deploy \
   --env "DD_TRACE_LANGCHAIN_ENABLED=false"
 ```
 
-`DD_TRACE_LANGCHAIN_ENABLED=false` is **required**, not optional — see [Known issues / gotchas](#known-issues--gotchas) below.
+`DD_TRACE_LANGCHAIN_ENABLED=false` は**必須**でオプションではありません — 詳細は下記の[既知の問題・落とし穴](#known-issues--gotchas)を参照してください。
 
-**3. Lambda APM (iteration-2 and iteration-3 only)**
+**3. Lambda APM(iteration-2、iteration-3のみ)**
 
-The [Datadog Serverless Macro](https://docs.datadoghq.com/serverless/libraries_integrations/macro/) needs to be installed once per AWS account/region:
+[Datadog Serverless Macro](https://docs.datadoghq.com/serverless/libraries_integrations/macro/) をAWSアカウント/リージョンごとに一度だけインストールする必要があります:
 
 ```bash
 aws cloudformation create-stack \
@@ -133,7 +133,7 @@ aws cloudformation create-stack \
   --capabilities CAPABILITY_AUTO_EXPAND CAPABILITY_IAM
 ```
 
-Then, in `iteration-<N>/template.yaml`, extend `Transform` from a single string into a list, and add a `DatadogApiKey` parameter (`NoEcho: true` — the value is passed in at deploy time, never hardcoded):
+その上で、`iteration-<N>/template.yaml` の `Transform` を単一文字列からリストに拡張し、`DatadogApiKey` パラメータ(`NoEcho: true` — 値はデプロイ時に渡すだけで、ハードコードしません)を追加します:
 
 ```yaml
 Transform:
@@ -142,44 +142,44 @@ Transform:
     Parameters:
       stackName: !Ref "AWS::StackName"
       apiKey: !Ref DatadogApiKey
-      pythonLayerVersion: "<LATEST_PYTHON_LAYER_VERSION>"      # see: curl -s https://api.github.com/repos/DataDog/datadog-lambda-python/releases/latest
-      extensionLayerVersion: "<LATEST_EXTENSION_LAYER_VERSION>" # see: curl -s https://api.github.com/repos/DataDog/datadog-lambda-extension/releases/latest
+      pythonLayerVersion: "<最新のPython Layerバージョン>"      # 確認方法: curl -s https://api.github.com/repos/DataDog/datadog-lambda-python/releases/latest
+      extensionLayerVersion: "<最新のExtension Layerバージョン>" # 確認方法: curl -s https://api.github.com/repos/DataDog/datadog-lambda-extension/releases/latest
       service: agentcore-iteration-<N>-chat
       env: sandbox
       site: datadoghq.com
 
 Parameters:
-  # ... existing parameters ...
+  # ... 既存のパラメータ ...
   DatadogApiKey:
     Type: String
     NoEcho: true
 ```
 
-The macro requires each instrumented function's `FunctionName` to be a **literal string**, not a `!Sub`/intrinsic expression (it needs the concrete name to wire up log subscriptions).
+このMacroは、計装対象の各関数の `FunctionName` が(`!Sub`などの組み込み式ではなく)**リテラル文字列**であることを要求します(ログサブスクリプションを設定する際に具体的な名前が必要なため)。
 
-> **Gotcha with multiple functions in one template (iteration-3)**: setting a per-function service name via `Metadata: {DatadogServerless: {service: ...}}` on each `AWS::Serverless::Function` resource did **not** actually set `DD_SERVICE` (verified with `aws lambda get-function-configuration` — it was simply absent). The reliable fix is to set `DD_SERVICE` as a plain `Environment.Variables` entry directly on each function instead:
+> **1つのテンプレートに複数関数がある場合の落とし穴(iteration-3)**: 各 `AWS::Serverless::Function` リソースに `Metadata: {DatadogServerless: {service: ...}}` で関数ごとのサービス名を設定しても、実際には `DD_SERVICE` は設定されませんでした(`aws lambda get-function-configuration` で確認 — 単純に存在していなかった)。確実な回避策は、代わりに各関数の `Environment.Variables` に直接 `DD_SERVICE` を設定することです:
 > ```yaml
 >       Environment:
 >         Variables:
->           DD_SERVICE: agentcore-iteration-<N>-chat   # set directly per function; don't rely on Metadata.service
+>           DD_SERVICE: agentcore-iteration-<N>-chat   # 各関数に直接設定する。Metadata.serviceには依存しない
 > ```
 
-Then build and deploy with the key passed as a parameter override:
+その上で、キーをパラメータとして渡してビルド・デプロイします:
 
 ```bash
 cd iteration-<N>
 sam build
 sam deploy --parameter-overrides \
-  "AgentCoreRuntimeArn=<your agent ARN>" \
-  "CognitoUserPoolArn=<your Cognito user pool ARN>" \
+  "AgentCoreRuntimeArn=<あなたのエージェントARN>" \
+  "CognitoUserPoolArn=<あなたのCognitoユーザープールARN>" \
   "DatadogApiKey=${DD_API_KEY}"
 ```
 
-**4. Trace correlation across the Lambda → AgentCore call (iteration-2 and iteration-3)**
+**4. Lambda → AgentCore呼び出しを越えたトレース連携(iteration-2、iteration-3)**
 
-`invoke_agent_runtime` is an IAM SigV4-signed AWS SDK call, not HTTP, so Datadog cannot propagate trace context automatically the way it does across real HTTP hops. To connect the Lambda's trace with the agent's LLM-call spans into one trace, the trace context is manually smuggled through the JSON payload:
+`invoke_agent_runtime` はHTTPではなく、IAMのSigV4署名付きAWS SDK呼び出しのため、実際のHTTPホップの場合のようにDatadogが自動でトレースコンテキストを伝播することはできません。Lambdaのトレースとエージェント側のLLM呼び出しスパンを1つのトレースとして繋げるため、トレースコンテキストをJSONペイロード経由で手動で運びます:
 
-In the Lambda (`lambda/app.py`), inject the current trace context into the request payload:
+Lambda側(`lambda/app.py`)で、現在のトレースコンテキストをリクエストペイロードにinjectします:
 
 ```python
 from ddtrace import tracer
@@ -195,7 +195,7 @@ response = client.invoke_agent_runtime(
 )
 ```
 
-In the agent (`agent/agent.py`), extract it and open a **real child span** before invoking the LangGraph agent — merely `tracer.context_provider.activate(...)` on the extracted context is *not* enough (see gotcha below):
+エージェント側(`agent/agent.py`)では、それをextractし、LangGraphエージェントを呼び出す前に**本物の子スパン**を開きます — extractしたコンテキストに対して単に `tracer.context_provider.activate(...)` するだけでは*不十分*です(下記の落とし穴を参照):
 
 ```python
 import contextlib
@@ -206,9 +206,9 @@ from ddtrace.propagation.http import HTTPPropagator
 dd_trace_headers = payload.get("_datadog_trace_headers") if payload else None
 dd_context = HTTPPropagator.extract(dd_trace_headers) if dd_trace_headers else None
 
-# Span implements the context-manager protocol (auto-finish on exit), so use
-# nullcontext() when there's no incoming trace context instead of duplicating
-# the invoke() call across an if/else.
+# Spanはコンテキストマネージャプロトコルを実装している(exit時に自動でfinishする)ため、
+# 受信したトレースコンテキストがない場合はif/elseでinvoke()呼び出しを重複させる代わりに
+# nullcontext()を使う。
 span_ctx = (
     tracer.start_span("agentcore.invoke", child_of=dd_context, service=os.environ.get("DD_SERVICE"), activate=True)
     if dd_context and dd_context.trace_id
@@ -218,136 +218,249 @@ with span_ctx:
     result = get_agent().invoke({"messages": [("human", prompt)]})
 ```
 
-### Known issues / gotchas
+### <a id="known-issues--gotchas"></a>既知の問題・落とし穴
 
-- **LangGraph + ddtrace crash**: enabling `LLMObs.enable(...)` on an agent that uses LangGraph tools can crash real requests (not just tracing) the moment a tool executes, due to a ddtrace bug ([dd-trace-py#18561](https://github.com/DataDog/dd-trace-py/issues/18561)) where a non-JSON-serializable object leaks into span metadata. Workaround: set `DD_TRACE_LANGCHAIN_ENABLED=false` on the agent (do **not** also disable `DD_TRACE_LANGGRAPH_ENABLED` — that avoids the crash too, but destroys the trace's workflow structure).
-- **AgentCore's own OTel-based observability and Datadog's ddtrace run independently, side by side** — `agentcore deploy` auto-enables an AWS-native OTel pipeline (X-Ray / CloudWatch GenAI Observability Dashboard) on every agent. ddtrace detects this and explicitly does not use it (falls back to its own native instrumentation instead), so the two produce separate, unconnected traces. Verified both are actually receiving live data (not just "configured") via `aws xray get-trace-summaries`/`batch-get-traces`.
-- **AgentCore CLI is deprecated in favor of `@aws/agentcore`**: this repo (and this fork's instrumentation) uses `bedrock-agentcore-starter-toolkit` (`pip install bedrock-agentcore`), which prints a deprecation notice on every command. Set `AGENTCORE_SUPPRESS_RECOMMENDATION=1` to silence it.
+- **LangGraph + ddtraceのクラッシュ**: LangGraphのツールを使うエージェントで `LLMObs.enable(...)` を有効にすると、ツールが実行された瞬間に(トレーシングだけでなく)実際のリクエストがクラッシュすることがあります。これはddtraceのバグ([dd-trace-py#18561](https://github.com/DataDog/dd-trace-py/issues/18561))が原因で、JSONシリアライズ不可能なオブジェクトがスパンのメタデータに漏れ込むためです。回避策: エージェントに `DD_TRACE_LANGCHAIN_ENABLED=false` を設定する(`DD_TRACE_LANGGRAPH_ENABLED` も一緒に無効化しては**いけません** — それもクラッシュを避けられますが、トレースのワークフロー構造が失われてしまいます)。
+- **AgentCore自身のOTelベースのObservabilityとDatadogのddtraceは、互いに独立して並行動作します** — `agentcore deploy` はすべてのエージェントに対して、AWSネイティブなOTelパイプライン(X-Ray / CloudWatch GenAI Observability Dashboard)を自動で有効化します。ddtraceはこれを検知し、明示的にそれを使わない(代わりに自身のネイティブな計装にフォールバックする)ため、2つは別々の連携しないトレースを生成します。両方が実際にライブデータを受信していること(単に「設定されている」だけでないこと)を `aws xray get-trace-summaries`/`batch-get-traces` で確認済みです。
+- **AgentCore CLIは`@aws/agentcore`への移行に伴い非推奨化されています**: 本リポジトリ(およびこのフォークの計装)は `bedrock-agentcore-starter-toolkit`(`pip install bedrock-agentcore`)を使用しており、コマンド実行ごとに非推奨の通知が表示されます。`AGENTCORE_SUPPRESS_RECOMMENDATION=1` を設定すると抑制できます。
 
-## How to Use This Repository
+## このリポジトリの使い方
 
-This repository is designed to be walked through sequentially, starting with the simplest (but least secure) pattern and progressively adding layers of security and functionality.
+このリポジトリは、最もシンプル(だが最も安全性が低い)なパターンから始めて、セキュリティと機能のレイヤーを段階的に追加していく順番で読み進めることを想定しています。
 
-**Recommended approach:**
+**推奨の進め方:**
 
-1. **Start with Iteration 0** to understand the basics of Amazon Bedrock AgentCore and Amazon Cognito OAuth authentication. This is the quickest way to get an agent running, but exposes the agent directly to the browser.
+1. **Iteration 0から始めて**、Amazon Bedrock AgentCoreとAmazon Cognito OAuth認証の基本を理解します。エージェントを最速で動かせる方法ですが、エージェントがブラウザに直接露出します。
 
-![Direct client to agent architecture](images/client_to_agent_arch.png)
+```mermaid
+flowchart LR
+    subgraph AWS["AWS"]
+        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
+    end
+    Client(["🖥️ Client<br/>(ブラウザ)"])
 
-2. **Move to Iteration 1** to add Amazon API Gateway in front of the agent. This adds rate limiting via AWS WAF, but has a security gap: users get a JWT that works for both the API and the agent directly.
+    Client -- "OAuth (Amazon Cognito JWT)" --> Agent
 
-![OAuth integration with AgentCore Runtime](images/oauth_waf_apigateway_agent.png)
+    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
+    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
 
+    Client -. 計装 .-> RUM
+    Agent -. 計装 .-> APM
 
-3. **Progress to Iteration 2** to fix the security gap by switching to IAM authentication. Now users authenticate to Amazon API Gateway with Amazon Cognito, but the AWS Lambda calls the agent using IAM credentials. Users can no longer bypass your API.
-
-![IAM integration with AgentCore Runtime](images/iteration_2.png)
-
-
-4. **Finish with Iteration 3** to add conversation persistence using Amazon Bedrock AgentCore Memory and Amazon DynamoDB for a full-featured chat experience.
-
-![IAM integration with AgentCore Runtime with additional functionality for memory](images/iteration_3.png)
-
-
-You can also jump directly to any iteration if you already understand the tradeoffs, or use a specific iteration as a starting point for your own project.
-
-> **Note**: The Amazon Cognito stack deployed in Iteration 0 is shared across all iterations, so you only need to deploy it once.
-
-## Iterations
-
-### Iteration 0: Direct Browser to Amazon Bedrock AgentCore
-
-**Best for**: Quick prototypes and understanding the basics.
-
-```
-Browser → Amazon Bedrock AgentCore Runtime (OAuth via Amazon Cognito)
+    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
+    style APM fill:#632CA6,stroke:#632CA6,color:#fff
 ```
 
-- Simplest possible setup
-- Browser calls Amazon Bedrock AgentCore directly
-- Amazon Cognito OAuth for authentication
-- **Datadog**: RUM+Logs on the frontend, APM + LLM Observability on the agent
+2. **Iteration 1に進み**、エージェントの前段にAmazon API Gatewayを追加します。AWS WAFによるレート制限が加わりますが、セキュリティ上のギャップが残ります: ユーザーが取得するJWTはAPIとエージェントの両方に対して直接使えてしまいます。
 
-[View Iteration 0 →](./iteration-0/)
+```mermaid
+flowchart LR
+    Client(["🖥️ Client<br/>(ブラウザ)"])
+    WAF["AWS WAF"]
+    APIGW["Amazon API Gateway"]
+    subgraph AWS["AWS"]
+        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
+    end
+
+    Client --> WAF --> APIGW -- "OAuth JWTパススルー" --> Agent
+    Client -. "同じJWTで直接呼び出しも可能<br/>(このイテレーションのセキュリティ上の課題)" .-> Agent
+
+    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
+    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
+
+    Client -. 計装 .-> RUM
+    Agent -. 計装 .-> APM
+
+    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
+    style APM fill:#632CA6,stroke:#632CA6,color:#fff
+```
+
+3. **Iteration 2に進み**、IAM認証に切り替えることでこのセキュリティ上のギャップを修正します。ユーザーはAmazon Cognitoを使ってAmazon API Gatewayに認証しますが、AWS LambdaはIAMクレデンシャルを使ってエージェントを呼び出します。ユーザーはAPIを迂回できなくなります。
+
+```mermaid
+flowchart LR
+    Client(["🖥️ Client<br/>(ブラウザ)"])
+    Cognito["Amazon Cognito"]
+    subgraph AWS["AWS"]
+        WAF["AWS WAF"]
+        APIGW["Amazon API Gateway"]
+        Lambda["AWS Lambda"]
+        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
+        Down["Downstream components<br/>(MCP gateways, memory, RAGなど)"]
+    end
+
+    Client --> Cognito
+    Client --> WAF --> APIGW -- "IAM auth" --> Lambda -- "IAM auth" --> Agent --> Down
+
+    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
+    LambdaAPM["🐶 Datadog Lambda APM<br/>設定箇所: template.yaml (Serverless Macro)"]
+    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
+    Corr["🐶 トレース連携<br/>設定箇所: lambda/app.py ⇄ agent/agent.py<br/>(SigV4呼び出しのためコンテキストをpayloadで受け渡し)"]
+
+    Client -. 計装 .-> RUM
+    Lambda -. 計装 .-> LambdaAPM
+    Agent -. 計装 .-> APM
+    Lambda -.-> Corr
+    Corr -.-> Agent
+
+    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
+    style LambdaAPM fill:#632CA6,stroke:#632CA6,color:#fff
+    style APM fill:#632CA6,stroke:#632CA6,color:#fff
+    style Corr fill:#632CA6,stroke:#632CA6,color:#fff
+```
+
+4. **Iteration 3で仕上げ**、Amazon Bedrock AgentCore MemoryとAmazon DynamoDBを使って会話の永続化を追加し、フル機能のチャット体験にします。
+
+```mermaid
+flowchart LR
+    Client(["🖥️ Client<br/>(ブラウザ)"])
+    subgraph AWS["AWS"]
+        WAF["AWS WAF"]
+        APIGW["Amazon API Gateway"]
+        LambdaChat["AWS Lambda (chat)"]
+        LambdaConv["AWS Lambda (conversations)"]
+        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
+        Memory["Amazon Bedrock AgentCore Memory"]
+        Dynamo["Amazon DynamoDB"]
+    end
+
+    Client --> WAF --> APIGW
+    APIGW -- "/api/chat" --> LambdaChat --> Agent
+    APIGW -- "/api/conversations" --> LambdaConv --> Memory
+    Agent --> Memory
+    Memory --> Dynamo
+    LambdaConv --> Dynamo
+
+    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
+    LambdaAPM["🐶 Datadog Lambda APM (2関数)<br/>設定箇所: template.yaml (Serverless Macro)"]
+    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
+    Corr["🐶 トレース連携 (chat Lambda→Agentのみ)<br/>設定箇所: functions/chat/app.py ⇄ agent/agent.py"]
+
+    Client -. 計装 .-> RUM
+    LambdaChat -. 計装 .-> LambdaAPM
+    LambdaConv -. 計装 .-> LambdaAPM
+    Agent -. 計装 .-> APM
+    LambdaChat -.-> Corr
+    Corr -.-> Agent
+
+    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
+    style LambdaAPM fill:#632CA6,stroke:#632CA6,color:#fff
+    style APM fill:#632CA6,stroke:#632CA6,color:#fff
+    style Corr fill:#632CA6,stroke:#632CA6,color:#fff
+```
+
+トレードオフをすでに理解している場合は、任意のイテレーションに直接進んでも構いません。あるいは特定のイテレーションを自分のプロジェクトの出発点として使うこともできます。
+
+> **注記**: Iteration 0でデプロイするAmazon Cognitoスタックは全イテレーションで共有されるため、デプロイは一度だけで済みます。
+
+## イテレーション一覧
+
+### Iteration 0: ブラウザから直接Amazon Bedrock AgentCoreへ
+
+**適した用途**: 素早いプロトタイピングと基本の理解。
+
+```
+Browser → Amazon Bedrock AgentCore Runtime (Amazon CognitoによるOAuth)
+```
+
+- 最もシンプルな構成
+- ブラウザがAmazon Bedrock AgentCoreを直接呼び出す
+- 認証はAmazon Cognito OAuth
+- **Datadog**: フロントエンドにRUM+Logs、エージェントにAPM + LLM Observability
+
+[Iteration 0を見る →](./iteration-0/)
 
 ### Iteration 1: Amazon API Gateway + Amazon Bedrock AgentCore
 
-**Best for**: Adding API management without custom compute.
+**適した用途**: 独自のコンピュートを追加せずにAPI管理を追加したい場合。
 
 ```
 Browser → Amazon API Gateway → Amazon Bedrock AgentCore Runtime (OAuth)
               (Amazon Cognito)
 ```
 
-- Amazon API Gateway handles rate limiting, request validation
-- Amazon Cognito authorizer on Amazon API Gateway
-- OAuth JWT pass-through to Amazon Bedrock AgentCore
-- **Security note**: User JWT works for both API and agent - not ideal for production
-- **Datadog**: RUM+Logs on the frontend, APM + LLM Observability on the agent
+- Amazon API Gatewayがレート制限・リクエスト検証を担当
+- Amazon API Gatewayに Amazon Cognito authorizer を設定
+- OAuth JWTをAmazon Bedrock AgentCoreへパススルー
+- **セキュリティ上の注記**: ユーザーのJWTがAPIとエージェントの両方に使えてしまう — 本番環境には不向き
+- **Datadog**: フロントエンドにRUM+Logs、エージェントにAPM + LLM Observability
 
-[View Iteration 1 →](./iteration-1/)
+[Iteration 1を見る →](./iteration-1/)
 
-### Iteration 2: Amazon API Gateway + AWS Lambda + Amazon Bedrock AgentCore (IAM Auth)
+### Iteration 2: Amazon API Gateway + AWS Lambda + Amazon Bedrock AgentCore(IAM認証)
 
-**Best for**: Secure production setup with custom compute layer.
+**適した用途**: 独自のコンピュート層を持つ、セキュアな本番構成。
 
 ```
-Browser → Amazon API Gateway → AWS Lambda → Amazon Bedrock AgentCore Runtime (IAM Auth)
+Browser → Amazon API Gateway → AWS Lambda → Amazon Bedrock AgentCore Runtime (IAM認証)
               (Amazon Cognito)
 ```
 
-- AWS Lambda layer for custom logic, logging, input validation
-- Agent uses IAM auth - users can't bypass API to call agent directly
-- Amazon Cognito validation at Amazon API Gateway level only
-- Fixes the security gap in Iteration 1
-- **Datadog**: RUM+Logs on the frontend, Lambda APM via the Datadog Serverless Macro, APM + LLM Observability on the agent, with trace correlation across the Lambda → AgentCore call
+- 独自のロジック・ログ出力・入力検証のためのAWS Lambda層
+- エージェントはIAM認証を使用 — ユーザーはAPIを迂回してエージェントを直接呼び出せない
+- Amazon Cognitoによる検証はAmazon API Gatewayレベルのみ
+- Iteration 1のセキュリティ上のギャップを修正
+- **Datadog**: フロントエンドにRUM+Logs、Datadog Serverless Macro経由のLambda APM、エージェントにAPM + LLM Observability、Lambda → AgentCore呼び出しを越えたトレース連携
 
-[View Iteration 2 →](./iteration-2/)
+[Iteration 2を見る →](./iteration-2/)
 
-### Iteration 3: Amazon API Gateway + AWS Lambda + Amazon Bedrock AgentCore with Memory
+### Iteration 3: Amazon API Gateway + AWS Lambda + Amazon Bedrock AgentCore(Memory付き)
 
-**Best for**: Full-featured chat with conversation persistence.
+**適した用途**: 会話の永続化を備えた、フル機能のチャット体験。
 
 ```
 Browser → Amazon API Gateway → AWS Lambda (Chat) → Amazon Bedrock AgentCore Runtime + Memory
                             → AWS Lambda (Conversations) → Amazon Bedrock AgentCore Memory + Amazon DynamoDB
 ```
 
-- Separate AWS Lambda functions for chat and conversation history
-- Amazon Bedrock AgentCore Memory for conversation persistence
-- Amazon DynamoDB for conversation metadata (names)
-- Auto-generated conversation names
-- **Datadog**: RUM+Logs on the frontend, Lambda APM via the Datadog Serverless Macro on both Lambdas, APM + LLM Observability on the agent, with trace correlation across the chat Lambda → AgentCore call (only the `chat` Lambda calls the agent; `conversations` talks to AgentCore Memory/DynamoDB directly and doesn't need it)
+- チャットと会話履歴でLambda関数を分離
+- 会話の永続化にAmazon Bedrock AgentCore Memoryを使用
+- 会話のメタデータ(名前)にAmazon DynamoDBを使用
+- 会話名を自動生成
+- **Datadog**: フロントエンドにRUM+Logs、両方のLambdaにDatadog Serverless Macro経由のLambda APM、エージェントにAPM + LLM Observability、chat Lambda → AgentCore呼び出しを越えたトレース連携(エージェントを呼ぶのは`chat` Lambdaのみ。`conversations`はAgentCore Memory/DynamoDBに直接アクセスするため連携は不要)
 
-[View Iteration 3 →](./iteration-3/)
+[Iteration 3を見る →](./iteration-3/)
 
-### Iteration 1 (OTel variant): Dual-shipping to AWS CloudWatch/X-Ray *and* Datadog via OpenTelemetry
+### Iteration 1(OTelバリアント): OpenTelemetry経由でAWS CloudWatch/X-Rayと*同時に*Datadogへも送信
 
-**Best for**: Answering "can we send telemetry to both AWS and Datadog via OTel instead of Datadog's native tracer?"
+**適した用途**: 「Datadogネイティブのトレーサーの代わりにOTelでAWSとDatadogの両方にテレメトリを送れるか?」という問いに答える。
 
-A copy of iteration-1 (doesn't touch its deployed agent) exploring whether AgentCore's own OTel-based observability pipeline can be extended to also ship to Datadog. Short answer: there's no existing in-process pipeline to extend (confirmed empirically — no in-process `TracerProvider`, no local OTLP collector), but genuine dual-ship works by having the app own its own OpenTelemetry SDK setup and fan out to two independent, collector-less direct-OTLP endpoints (AWS X-Ray's and Datadog's). See that folder's README for the full investigation, the working code pattern, and gotchas.
+iteration-1のコピー(デプロイ済みエージェントには影響しません)を使い、AgentCore自身のOTelベースのObservabilityパイプラインをDatadogへの送信にも拡張できるかを調査したものです。結論を先に言うと、拡張できる既存のin-processパイプラインは存在しません(実証的に確認済み — in-processの`TracerProvider`もローカルOTLPコレクタも存在しない)が、アプリ自身がOpenTelemetry SDKのセットアップを持ち、コレクタを介さない独立した2つの直接OTLPエンドポイント(AWS X-RayとDatadog)へfan-outすることで、実際のdual-shipは可能です。詳しい調査内容・動作するコードパターン・落とし穴は、そのフォルダのREADMEを参照してください。
 
-[View Iteration 1 (OTel variant) →](./iteration-1-otel/)
+[Iteration 1(OTelバリアント)を見る →](./iteration-1-otel/)
 
-## Prerequisites
+### Iteration 1(検証用バリアント): `agent.py`を変更せずにDatadog ddtrace/LLM Observabilityを有効化する2つの方式
 
-- AWS CLI configured with credentials (`aws configure`)
-- AWS SAM CLI installed ([installation guide](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html))
-- Python 3.11+ (`python3 --version` to check; use `uv python install 3.11` if your system default is older)
-- AgentCore CLI (`pip install bedrock-agentcore-starter-toolkit`)
-- Bedrock model access enabled in your AWS account (Claude models), in whichever region you deploy to
-- A Datadog account, with `DD_API_KEY` / `DD_APP_KEY` available (Application Keys page: `https://<your-org>.datadoghq.com/organization-settings/application-keys`) — needed for the Datadog observability steps in each iteration
+**適した用途**: 「`LLMObs.enable(...)`をコードに書く代わりに、設定・環境変数だけでDatadogを有効化できないか?」という問いに答える。
 
-> **Tip**: Run `aws sts get-caller-identity` to verify your AWS credentials are working before starting.
+iteration-1のコピーを2つ使い、`agent.py`に一切`ddtrace`/`LLMObs`関連のコードを書かずにDatadog APM + LLM Observabilityを有効化できるかを検証したものです。デプロイ方式(`deployment_type`)によって成立する方法が異なることを確認しています:
 
-## Getting Started
+- **`iteration-1-llmobs-env/`**(`deployment_type: direct_code_deploy`。iteration-0/1/2/3が実際に使っている方式): `sitecustomize.py`(1行: `import ddtrace.auto`)を`agent.py`の隣に置き、`PYTHONPATH=.`を環境変数として渡す方式で動作確認済み。
+- **`iteration-1-container-ddtrace-run/`**(`deployment_type: container`): デプロイ用`Dockerfile`の`CMD`に`ddtrace-run`を前置する方式で動作確認済み(ただしDockerfileが存在するcontainerデプロイでしか使えない)。
 
-**Start with Iteration 0** - it includes the Cognito stack that's shared across all iterations:
+どちらも実際にデプロイし、CloudWatchログとDatadog APMの両方でエンドツーエンドの動作を確認済みです。詳細は各フォルダのREADMEを参照してください。
+
+[Iteration 1(sitecustomize方式)を見る →](./iteration-1-llmobs-env/) / [Iteration 1(Dockerfile方式)を見る →](./iteration-1-container-ddtrace-run/)
+
+## 前提条件
+
+- AWS CLIがクレデンシャル付きで設定済み(`aws configure`)
+- AWS SAM CLIがインストール済み([インストールガイド](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html))
+- Python 3.11以上(`python3 --version` で確認。システムのデフォルトがそれより古い場合は `uv python install 3.11` を使用)
+- AgentCore CLI(`pip install bedrock-agentcore-starter-toolkit`)
+- デプロイ先リージョンのAWSアカウントでBedrockモデルアクセス(Claudeモデル)が有効になっていること
+- `DD_API_KEY` / `DD_APP_KEY` が使えるDatadogアカウント(Application Keysページ: `https://<your-org>.datadoghq.com/organization-settings/application-keys`) — 各イテレーションのDatadog Observabilityの手順で必要
+
+> **Tip**: 開始前に `aws sts get-caller-identity` を実行して、AWSクレデンシャルが有効か確認してください。
+
+## <a id="getting-started"></a>はじめに
+
+**Iteration 0から始めてください** — 全イテレーションで共有されるCognitoスタックが含まれています:
 
 ```bash
 cd iteration-0
 
-# Deploy Cognito (used by all iterations)
+# Cognitoをデプロイ(全イテレーションで使用)
 aws cloudformation deploy \
   --template-file cognito.yaml \
   --stack-name agentcore-cognito \
@@ -355,13 +468,13 @@ aws cloudformation deploy \
   --region us-east-1
 ```
 
-> **Note**: Wait for the stack to complete before proceeding. You can check status with:
+> **注記**: 次に進む前に、スタックの完了を待ってください。状態は以下で確認できます:
 > ```bash
 > aws cloudformation describe-stacks --stack-name agentcore-cognito --query 'Stacks[0].StackStatus'
 > ```
 
 ```bash
-# Create a test user
+# テストユーザーを作成
 USER_POOL_ID=$(aws cloudformation describe-stacks \
   --stack-name agentcore-cognito \
   --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' \
@@ -380,24 +493,24 @@ aws cognito-idp admin-set-user-password \
   --permanent
 ```
 
-> **Password Requirements**: Must be 8+ characters with uppercase, lowercase, numbers, and special characters
+> **パスワード要件**: 8文字以上で、大文字・小文字・数字・特殊文字を含む必要があります
 
-> **Username requirement**: this Cognito User Pool requires `<YOUR_USERNAME_HERE>` to be a valid **email address format** (e.g. `test-user@example.com`) — a plain username like `test-user` will be rejected with `Username should be an email`. It does not need to be a real, deliverable address.
+> **ユーザー名の要件**: このCognitoユーザープールは `<YOUR_USERNAME_HERE>` が有効な**メールアドレス形式**であることを要求します(例: `test-user@example.com`) — `test-user` のような単純なユーザー名は `Username should be an email` として拒否されます。実際に到達可能なアドレスである必要はありません。
 
-Then follow the README in each iteration folder.
+その後は各イテレーションフォルダのREADMEに従ってください。
 
-## Repository Structure
+## リポジトリ構成
 
 ```
 .
-├── iteration-0/        # Direct browser to Amazon Bedrock AgentCore
+├── iteration-0/        # ブラウザから直接Amazon Bedrock AgentCoreへ
 ├── iteration-1/        # Amazon API Gateway + Amazon Bedrock AgentCore (OAuth)
 ├── iteration-2/        # Amazon API Gateway + AWS Lambda + Amazon Bedrock AgentCore (IAM)
 └── iteration-3/        # AWS Lambda + Amazon Bedrock AgentCore with Memory
 ```
 
-## Security
-See CONTRIBUTING for more information.
+## セキュリティ
+詳細はCONTRIBUTINGを参照してください。
 
-## License
-This library is licensed under the MIT-0 License. See the LICENSE file.
+## ライセンス
+このライブラリはMIT-0 Licenseの下でライセンスされています。LICENSEファイルを参照してください。

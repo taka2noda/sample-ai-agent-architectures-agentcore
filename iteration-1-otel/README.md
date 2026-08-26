@@ -1,81 +1,113 @@
-# Iteration 1 (OTel variant): Dual-shipping telemetry to AWS CloudWatch/X-Ray *and* Datadog via OpenTelemetry
+# Iteration 1(OTelバリアント): OpenTelemetry経由でAWS CloudWatch/X-Rayと*同時に*Datadogへもdual-ship
 
-This is a copy of [iteration-1](../iteration-1/) (Browser → Amazon API Gateway → Amazon Bedrock AgentCore Runtime, OAuth pass-through) used to answer a specific question: **can a Bedrock AgentCore agent send the same trace data to both AWS CloudWatch/X-Ray and Datadog using OpenTelemetry, instead of Datadog's native `ddtrace` library?**
+Datadogネイティブの`ddtrace`ライブラリの代わりに、OpenTelemetry経由でAWS CloudWatch/X-RayとDatadogの両方に同じトレースを送れるかを検証したバリアント。
 
-It does not touch `iteration-1`'s own deployed agent (`agent_1`) — this uses a separate agent name (`agent_1_otel`) so both can coexist.
+## Overview
 
-## TL;DR answer
+- 実証するDatadog機能: OTLP直接取り込みによるAPM(コレクタ/Agent不要)
+- 技術スタック: Amazon Bedrock AgentCore Runtime上のLangGraphエージェント(Python)、OpenTelemetry SDK、AWS X-Ray直接OTLPエンドポイント
 
-**Yes, but not by "adding Datadog as a second export target" to something AgentCore already runs.** There is no existing in-process OpenTelemetry pipeline to extend (see below). The working approach is for the application to own its own OpenTelemetry SDK setup and fan out to **two independent, collector-less direct-OTLP endpoints** — one for AWS X-Ray, one for Datadog — from a single `TracerProvider`.
+これは [iteration-1](../iteration-1/)(Browser → Amazon API Gateway → Amazon Bedrock AgentCore Runtime、OAuthパススルー)のコピーで、次の具体的な問いに答えるために作成しました: **Bedrock AgentCoreのエージェントは、Datadogネイティブの`ddtrace`ライブラリの代わりにOpenTelemetryを使って、同じトレースデータをAWS CloudWatch/X-RayとDatadogの両方に送れるか?**
 
-## What we found investigating AgentCore's own OTel setup
+`iteration-1`本体の実際にデプロイ済みのエージェント(`agent_1`)には一切手を加えていません — 別のエージェント名(`agent_1_otel`)を使っており、両者は共存できます。
 
-`agentcore deploy` always auto-configures a set of `OTEL_*` environment variables on the runtime (`OTEL_PYTHON_DISTRO=aws_distro`, `OTEL_PYTHON_CONFIGURATOR=aws_configurator`, `OTEL_EXPORTER_OTLP_TRACES_HEADERS` with `x-aws-log-group`/`x-aws-log-stream`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_PYTHON_EXCLUDED_URLS=/ping`), and every `agentcore deploy` logs "Traces delivery enabled" — data does show up in the GenAI Observability Dashboard / X-Ray. It's reasonable to assume from this that OpenTelemetry auto-instrumentation is running inside your Python process. **It isn't.**
+**結論(先に要点)**: **できますが、「AgentCoreが既に動かしている何かに、Datadogを2番目の送信先として追加する」形にはなりません。** 拡張できる既存のin-process OpenTelemetryパイプラインは存在しません(詳細は「Notes」参照)。実際に機能する方法は、アプリケーション自身がOpenTelemetry SDKのセットアップを持ち、単一の`TracerProvider`から**コレクタを介さない独立した2つの直接OTLPエンドポイント**(AWS X-Ray向けとDatadog向け)へfan-outすることです。
 
-We probed the running agent process at three points — before any other import, right after `BedrockAgentCoreApp()` is constructed, and inside the request handler at actual invoke time — by dumping `opentelemetry.trace.get_tracer_provider()`. At every point it was the SDK's default `ProxyTracerProvider` (a no-op placeholder), never a real configured `TracerProvider`. We also tried POSTing to `http://localhost:4318/v1/traces` (the OTel SDK's default local OTLP/HTTP receiver address) from inside the running agent — `ConnectionRefused`.
+## Architecture
 
-**Conclusion:** whatever produces AgentCore's own CloudWatch/X-Ray telemetry happens entirely outside the customer's Python process, at the AWS platform/infrastructure layer. There is no shared `TracerProvider` or local collector for application code to attach a second (Datadog-facing) exporter to.
+```mermaid
+flowchart LR
+    Client(["🖥️ Client"])
+    APIGW["Amazon API Gateway"]
+    subgraph Runtime["Amazon Bedrock AgentCore Runtime"]
+        Span["1つのTracerProvider<br/>1つのagentcore.invokeスパン"]
+        ExpXRay["OTLPSpanExporter → AWS X-Ray<br/>(AwsXRayIdGenerator必須)"]
+        ExpDD["🐶 OTLPSpanExporter → Datadog<br/>設定箇所: agent/agent.py 内のTracerProvider設定<br/>+ 環境変数 (DD_API_KEY, OTEL_SERVICE_NAME)"]
+        Span --> ExpXRay
+        Span --> ExpDD
+    end
+    XRay["AWS X-Ray / CloudWatch"]
+    DD["Datadog APM"]
 
-## How dual-ship actually works here
+    Client --> APIGW --> Runtime
+    ExpXRay --> XRay
+    ExpDD --> DD
 
-Both AWS and Datadog offer **collector-less, direct OTLP trace ingestion** — no OpenTelemetry Collector or Datadog Agent needed:
+    style ExpDD fill:#632CA6,stroke:#632CA6,color:#fff
+    style DD fill:#632CA6,stroke:#632CA6,color:#fff
+```
 
-| Target | Endpoint | Auth |
-|---|---|---|
-| AWS X-Ray | `https://xray.<region>.amazonaws.com/v1/traces` | SigV4-signed request (needs `xray:PutTraceSegments` + `xray:PutTelemetryRecords` IAM permissions — already present on the agent's default execution role) |
-| Datadog | `https://otlp.datadoghq.com/v1/traces` | `dd-api-key` header, no signing |
+## Datadog設定
 
-`agent/agent.py` sets up **one `TracerProvider`** with **two `BatchSpanProcessor`s**, each wrapping its own `OTLPSpanExporter` pointed at one of the endpoints above, then wraps the agent invocation in a single span (`agentcore.invoke`). That one span gets independently exported to both backends.
+- 有効化している機能: OTLP直接取り込みによるAPM(`ddtrace`は使わない)
+- 関連ファイル: `agent/agent.py` — 1つの`TracerProvider`に2つの`BatchSpanProcessor`(AWS X-Ray向け、Datadog向け)を設定し、エージェント呼び出し全体を1つのスパン(`agentcore.invoke`)でラップ
+- 必要な環境変数 / APIキー(`agentcore deploy`実行時):
+  ```bash
+  agentcore deploy \
+    --env "DD_API_KEY=${DD_API_KEY}" \
+    --env "DD_ENV=sandbox" \
+    --env "OTEL_SERVICE_NAME=agentcore-iteration-1-otel-agent"
+  ```
+- エージェントの依存関係(`agent/requirements.txt`): 通常の `bedrock-agentcore`/`langchain`/`langgraph` に加えて `opentelemetry-api`、`opentelemetry-sdk`、`opentelemetry-exporter-otlp-proto-http`、`opentelemetry-sdk-extension-aws`、`botocore`、`requests`。
+- 送信先とエンドポイント:
 
-Two gotchas that will silently break this if missed:
-- **`AwsXRayIdGenerator()` is required** as the `TracerProvider`'s `id_generator`. X-Ray requires the first 4 bytes of a trace ID to encode a Unix timestamp; without this generator, traces are accepted (no error) but never appear in X-Ray/CloudWatch.
-- **The OTLP exporter's `session=` kwarg expects a `requests.Session` object**, not an auth callable. Passing a custom SigV4-signing object directly as `session=` throws `AttributeError: 'SigV4Session' object has no attribute 'headers'`. Instead, create a real `requests.Session()` and set `.auth` on it to the SigV4 callable.
-- Your account's X-Ray trace segment destination must be `CloudWatchLogs` (`aws xray get-trace-segment-destination` — this is typically already `ACTIVE` if you've run `agentcore deploy` before, since AgentCore's own observability setup configures it).
+  | 送信先 | エンドポイント | 認証 |
+  |---|---|---|
+  | AWS X-Ray | `https://xray.<region>.amazonaws.com/v1/traces` | SigV4署名付きリクエスト(`xray:PutTraceSegments` + `xray:PutTelemetryRecords` のIAM権限が必要 — エージェントのデフォルト実行ロールに既に付与済み) |
+  | Datadog | `https://otlp.datadoghq.com/v1/traces` | `dd-api-key` ヘッダー、署名不要 |
 
-## Verifying it worked
+- 見落とすと静かに壊れる落とし穴:
+  - **`AwsXRayIdGenerator()` が`TracerProvider`の`id_generator`として必須**です。X-RayはトレースIDの先頭4バイトがUnixタイムスタンプをエンコードしていることを要求します。このジェネレータがないと、トレースはエラーなく受理されますが、X-Ray/CloudWatchには一切表示されません。
+  - **OTLPエクスポータの`session=`kwargは`requests.Session`オブジェクトを期待しており**、認証用のcallableではありません。カスタムのSigV4署名オブジェクトを直接`session=`として渡すと `AttributeError: 'SigV4Session' object has no attribute 'headers'` になります。代わりに実際の `requests.Session()` を作成し、その `.auth` にSigV4のcallableを設定してください。
+  - アカウントのX-Rayトレースセグメントの送信先が `CloudWatchLogs` になっている必要があります(`aws xray get-trace-segment-destination` で確認 — 過去に`agentcore deploy`を実行していれば、AgentCore自身のObservabilityセットアップによって通常は既に`ACTIVE`になっています)。
 
-After invoking the agent, the same trace_id should be queryable in both places:
+## Prerequisites
+
+[iteration-1](../iteration-1/README.md)と同じ(共有 `agentcore-cognito` スタック、テストユーザー) — 手順はそちらのREADMEを参照してください。
+
+## Setup / How to Run
+
+[iteration-1](../iteration-1/README.md)と同じデプロイ構成(共有Cognitoスタック、OAuthパススルー、API Gateway + WAF)に従いますが、以下が異なります:
+
+1. **エージェントの設定・デプロイ** — iteration-1と同じ `agentcore configure`/`agentcore deploy` フローですが、既にデプロイ済みの `agent_1` と衝突しないよう別名(例: `agent_1_otel`)を使用します。Datadog APIキーとサービス名は上記の環境変数で渡します。
+2. **API Gateway + フロントエンド**: iteration-1と同一 — 新しいエージェントのRuntime IDで `api-gateway.yaml` をデプロイし、`frontend/index.html` の `CONFIG` を更新します。
+3. **テスト**: エージェントを呼び出します(`agentcore invoke` またはフロントエンド経由)。
+
+## Verify in Datadog
+
+エージェントを呼び出した後、同じtrace_idを両方の場所で検索できるはずです:
 
 ```bash
-# Datadog (via MCP or the UI) - search for service:<your OTEL_SERVICE_NAME>
-# Look for tag ingestion_reason:otel to confirm it came through direct OTLP, not ddtrace
+# Datadog(MCPまたはUI経由) - service:<あなたのOTEL_SERVICE_NAME> で検索
+# タグ ingestion_reason:otel を確認し、ddtraceではなく直接OTLP経由で来たことを確認
 
-# AWS X-Ray - the trace ID format differs (dashes inserted), e.g.
-# Datadog trace_id 6a8686f717b8f5fb0d237fc174c1830d ==
-# X-Ray trace ID    1-6a8686f7-17b8f5fb0d237fc174c1830d
+# AWS X-Ray - トレースIDのフォーマットが異なる(ダッシュが挿入される)、例:
+# Datadogのtrace_id 6a8686f717b8f5fb0d237fc174c1830d ==
+# X-RayのトレースID    1-6a8686f7-17b8f5fb0d237fc174c1830d
 aws xray get-trace-summaries --region <region> \
   --start-time $(date -u -v-15M +%s) --end-time $(date -u +%s)
 aws xray batch-get-traces --trace-ids <the-matching-id> --region <region>
 ```
 
-We confirmed this end-to-end: the `agentcore.invoke` span (with custom attributes `agentcore.prompt_length`/`agentcore.response_length` set in code) appeared in both Datadog and X-Ray under the exact same trace ID.
-
-## Caveats to flag before using this pattern for real
-
-- This is bespoke application code, not a documented/supported AgentCore or Datadog feature — nothing prevents it from working, but there's no vendor guarantee it keeps working if AWS changes AgentCore's internal telemetry plumbing.
-- It's unrelated to and doesn't interact with the `ddtrace`-based Datadog instrumentation used in iterations 0-3 — the two are separate, uncorrelated tracing pipelines if both were ever present in the same agent process (not attempted here; this experiment intentionally started from a clean copy to avoid interference).
-- Datadog's direct OTLP intake is intended for exactly this kind of serverless/managed-platform scenario where running a Collector or Agent isn't possible; for production workloads in general, Datadog recommends routing through a Collector/Agent for metadata enrichment and centralized sampling where that's an option (it isn't, here, inside AgentCore Runtime's sandbox).
-
-## Setup
-
-Follows the same deployment shape as [iteration-1](../iteration-1/README.md) (shared Cognito stack, OAuth pass-through, API Gateway + WAF), with these differences:
-
-1. **Prerequisites**: same as iteration-1 (shared `agentcore-cognito` stack, test user) — see that iteration's README for those steps.
-2. **Agent dependencies** (`agent/requirements.txt`): `opentelemetry-api`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http`, `opentelemetry-sdk-extension-aws`, `botocore`, `requests`, in addition to the usual `bedrock-agentcore`/`langchain`/`langgraph` set.
-3. **Configure and deploy the agent** — same `agentcore configure`/`agentcore deploy` flow as iteration-1, but use a distinct agent name (e.g. `agent_1_otel`) so you don't collide with an already-deployed `agent_1`. Pass the Datadog API key and service name as env vars:
-   ```bash
-   agentcore deploy \
-     --env "DD_API_KEY=${DD_API_KEY}" \
-     --env "DD_ENV=sandbox" \
-     --env "OTEL_SERVICE_NAME=agentcore-iteration-1-otel-agent"
-   ```
-4. **API Gateway + frontend**: identical to iteration-1 — deploy `api-gateway.yaml` with the new agent's Runtime ID, update `frontend/index.html`'s `CONFIG`.
-5. **Test**: invoke the agent (via `agentcore invoke` or the frontend) and check both Datadog and X-Ray for the resulting trace, as described above.
+エンドツーエンドで確認済みです: `agentcore.invoke` スパン(コード内で設定したカスタム属性`agentcore.prompt_length`/`agentcore.response_length`付き)が、DatadogとX-Rayの両方に、まったく同じトレースIDで出現しました。
 
 ## Cleanup
 
 ```bash
-aws cloudformation delete-stack --stack-name agentcore-api   # if you deployed API Gateway for this
+aws cloudformation delete-stack --stack-name agentcore-api   # このために API Gateway をデプロイした場合
 cd agent && agentcore destroy
-# Don't delete the shared Cognito stack if other iterations still use it
+# 他のイテレーションが使っている共有Cognitoスタックは削除しないこと
 ```
+
+## Notes
+
+**AgentCore自身のOTelセットアップを調査してわかったこと**: `agentcore deploy` は常にRuntime上に一連の `OTEL_*` 環境変数(`OTEL_PYTHON_DISTRO=aws_distro`、`OTEL_PYTHON_CONFIGURATOR=aws_configurator`、`x-aws-log-group`/`x-aws-log-stream`付きの`OTEL_EXPORTER_OTLP_TRACES_HEADERS`、`OTEL_RESOURCE_ATTRIBUTES`、`OTEL_PYTHON_EXCLUDED_URLS=/ping`)を自動設定し、`agentcore deploy` 実行のたびに "Traces delivery enabled" とログが出ます — 実際にGenAI Observability Dashboard/X-Rayにデータが表示されます。ここから、OpenTelemetryの自動計装がPythonプロセス内で動いていると考えるのは合理的です。**しかし実際には動いていません。**
+
+実行中のエージェントプロセスを3つの時点(他のどのimportよりも前、`BedrockAgentCoreApp()` を構築した直後、実際の呼び出し時のリクエストハンドラ内)で、`opentelemetry.trace.get_tracer_provider()` の内容をダンプして調査しました。**どの時点でも、SDKのデフォルトである `ProxyTracerProvider`(no-opのプレースホルダー)のままで**、実際に設定された`TracerProvider`ではありませんでした。また、実行中のエージェント内から `http://localhost:4318/v1/traces`(OTel SDKのデフォルトのローカルOTLP/HTTP受信アドレス)へPOSTを試みましたが — `ConnectionRefused` でした。
+
+**結論:** AgentCore自身のCloudWatch/X-Rayテレメトリを生成しているものは何であれ、それは完全に顧客のPythonプロセスの外側、AWSプラットフォーム/インフラ層で行われています。アプリケーションコードが2番目(Datadog向け)のエクスポータを追加できるような、共有された`TracerProvider`やローカルコレクタは存在しません。
+
+**実運用でこのパターンを使う前に押さえておくべき注意点**:
+- これは独自に書いたアプリケーションコードであり、AgentCoreやDatadogのドキュメント化された/サポート対象の機能ではありません — 動作を妨げるものは何もありませんが、AWSがAgentCore内部のテレメトリの仕組みを変更した場合に動作し続けることをベンダーが保証するものではありません。
+- iteration 0-3で使っている`ddtrace`ベースのDatadog計装とは無関係で、干渉もしません — 両方が同じエージェントプロセスに存在した場合、2つは別々の連携しないトレーシングパイプラインになります(本検証では試していません。干渉を避けるため、意図的にクリーンなコピーから始めています)。
+- DatadogのOTLP直接取り込みは、CollectorやAgentを動かせないこの種のサーバーレス/マネージドプラットフォームのシナリオのために用意されたものです。本番ワークロード全般については、メタデータの拡充や集中サンプリングのためにCollector/Agentを経由することをDatadogは推奨しています(それが選択肢になる場合)。ここ(AgentCore Runtimeのサンドボックス内)では選択肢になりません。

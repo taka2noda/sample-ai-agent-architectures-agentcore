@@ -1,21 +1,67 @@
-# Iteration 1: Amazon API Gateway + Amazon Bedrock AgentCore Runtime (OAuth Pass-through)
+# Iteration 1: Amazon API Gateway + Amazon Bedrock AgentCore Runtime(OAuthパススルー)
 
-Amazon API Gateway in front of Amazon Bedrock AgentCore Runtime with Amazon Cognito authentication and AWS WAF protection.
+Amazon Bedrock AgentCore Runtimeの前段に、Amazon Cognito認証とAWS WAF保護付きのAmazon API Gatewayを配置する構成。
+
+## Overview
+
+- 実証するDatadog機能: RUM + Logs(フロントエンド)、APM + LLM/Agent Observability(エージェント)
+- 技術スタック: Amazon Bedrock AgentCore Runtime上のLangGraphエージェント(Python)、Amazon API Gateway、AWS WAF、Amazon Cognito(OAuth)
+
+**主要な概念**:
+- **OAuthトークンのパススルー**: 同じAmazon Cognito JWTがAmazon API GatewayとAmazon Bedrock AgentCoreの両方で検証される
+- **AWS WAFによる保護**: IPごとのレート制限
+- **セキュリティ上の注記**: ユーザーのJWTはAPIとエージェントの両方に直接使える — 修正方法はIteration 2を参照
 
 ## Architecture
 
-![OAuth integration with AgentCore Runtime](../images/oauth_waf_apigateway_agent.png)
+```mermaid
+flowchart LR
+    Client(["🖥️ Client<br/>(ブラウザ)"])
+    WAF["AWS WAF"]
+    APIGW["Amazon API Gateway"]
+    subgraph AWS["AWS"]
+        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
+    end
 
+    Client --> WAF --> APIGW -- "OAuth JWTパススルー" --> Agent
+    Client -. "同じJWTで直接呼び出しも可能<br/>(このイテレーションのセキュリティ上の課題)" .-> Agent
 
-## Key Concepts
+    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
+    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
 
-- **OAuth token pass-through**: Same Amazon Cognito JWT validates at both Amazon API Gateway AND Amazon Bedrock AgentCore
-- **AWS WAF protection**: Rate limiting per IP
-- **Security note**: User JWT works for both API and agent directly - see Iteration 2 for the fix
+    Client -. 計装 .-> RUM
+    Agent -. 計装 .-> APM
+
+    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
+    style APM fill:#632CA6,stroke:#632CA6,color:#fff
+```
+
+## Datadog設定
+
+- 有効化している機能: RUM + Logs(フロントエンド)、APM + LLM/Agent Observability(エージェント)。iteration-0と同じパターンです。
+- 関連ファイル:
+  - `frontend/index.html` — Datadog Browser SDKのRUM/Logs初期化スニペット。RUM application名は `agentcore-sample-iteration-1`。
+  - `agent/agent.py` — 最初のimportとして `ddtrace.llmobs.LLMObs.enable(...)` を呼び出し
+- 必要な環境変数 / APIキー(エージェントの `agentcore deploy` 実行時に渡す):
+  ```bash
+  agentcore deploy \
+    --env "DD_API_KEY=${DD_API_KEY}" \
+    --env "DD_SITE=datadoghq.com" \
+    --env "DD_LLMOBS_ML_APP_NAME=agentcore-iteration-1-agent" \
+    --env "DD_ENV=sandbox" \
+    --env "DD_SERVICE=agentcore-iteration-1-agent" \
+    --env "DD_TRACE_LANGCHAIN_ENABLED=false" \
+    --env 'DD_TRACE_SAMPLING_RULES=[{"resource": "GET /ping", "sample_rate": 0}]'
+  ```
+  `DD_TRACE_LANGCHAIN_ENABLED=false` は必須です — ルートREADMEの「既知の問題・落とし穴」内の [dd-trace-py#18561](https://github.com/DataDog/dd-trace-py/issues/18561) を参照してください。`DD_TRACE_SAMPLING_RULES` はAgentCore自身の `GET /ping` ヘルスチェックのノイズをAPMから除外します。このイテレーションにはLambdaがないため、プロセス間のトレース伝播は不要です。
+- 汎用的な手順(RUM appの作成、`agent.py` の正確なコードスニペットなど)については、ルートの [README.md → Datadogセットアップ手順](../README.md#datadog-setup-steps) を参照してください。
+- 関連する別バリアント:
+  - [`../iteration-1-otel/`](../iteration-1-otel/) — AgentCore自身のAWSネイティブなOTelパイプラインを、ここで使っている`ddtrace`の*代わりに*Datadogへdual-shipできるかを調査したバリアント
+  - [`../iteration-1-llmobs-env/`](../iteration-1-llmobs-env/)(`sitecustomize.py`方式)、[`../iteration-1-container-ddtrace-run/`](../iteration-1-container-ddtrace-run/)(Dockerfile方式) — `agent.py`に一切ddtrace/LLMObsのコードを書かずに済ませる方式の検証
 
 ## Prerequisites
 
-**Amazon Cognito must be deployed first** (from iteration-0):
+**Amazon Cognitoを先にデプロイしておく必要があります**(iteration-0から):
 
 ```bash
 cd ../iteration-0
@@ -26,9 +72,9 @@ aws cloudformation deploy \
   --region us-east-1
 ```
 
-> **Note**: If you already deployed Amazon Cognito for iteration-0, skip this step.
+> **注記**: iteration-0で既にAmazon Cognitoをデプロイ済みの場合はこの手順をスキップしてください。
 
-If you haven't created a test user yet:
+まだテストユーザーを作成していない場合:
 ```bash
 USER_POOL_ID=$(aws cloudformation describe-stacks \
   --stack-name agentcore-cognito \
@@ -48,24 +94,11 @@ aws cognito-idp admin-set-user-password \
   --permanent
 ```
 
-> **Password Requirements**: Must be 8+ characters with uppercase, lowercase, numbers, and special characters.
+> **パスワード要件**: 8文字以上で、大文字・小文字・数字・特殊文字を含む必要があります。
 
-## Project Structure
+## Setup / How to Run
 
-```
-iteration-1/
-├── README.md
-├── api-gateway.yaml         # Amazon API Gateway + AWS WAF CloudFormation template
-├── agent/
-│   ├── agent.py             # LangGraph agent
-│   └── requirements.txt
-└── frontend/
-    └── index.html           # Single-page chat UI
-```
-
-## Deployment
-
-### 1. Get Amazon Cognito Outputs
+### 1. Amazon Cognitoの出力値を取得
 
 ```bash
 CLIENT_ID=$(aws cloudformation describe-stacks \
@@ -82,40 +115,40 @@ echo "Client ID: $CLIENT_ID"
 echo "Discovery URL: $DISCOVERY_URL"
 ```
 
-### 2. Deploy Agent with OAuth
+### 2. OAuth付きでエージェントをデプロイ
 
 ```bash
 cd agent
 agentcore configure
 ```
-When prompted during configuration:
+設定時のプロンプトでは以下を入力します:
 - **Entrypoint**: `agent.py`
-- **Agent name**: `agent_1` (or press Enter for default)
-- **Requirements file**: Press Enter to use detected `requirements.txt`
-- **Deployment type**: `1` (Direct Code Deploy)
-- **Python runtime**: `2` (PYTHON_3_11)
-- **Execution role**: Press Enter to auto-create
-- **S3 bucket**: Press Enter to auto-create
+- **Agent name**: `agent_1`(またはEnterでデフォルト)
+- **Requirements file**: Enterで検出された`requirements.txt`を使用
+- **Deployment type**: `1`(Direct Code Deploy)
+- **Python runtime**: `2`(PYTHON_3_11)
+- **Execution role**: Enterで自動作成
+- **S3 bucket**: Enterで自動作成
 - **Configure OAuth authorizer?**: `yes`
-- **OAuth discovery URL**: Use the `$DISCOVERY_URL` from step 1
-- **Allowed OAuth client IDs**: Leave empty (press Enter)
-- **Allowed OAuth audience**: Enter your `$CLIENT_ID` from step 1
-- **Allowed OAuth scopes**: Leave empty (press Enter)
-- **Custom claims**: Leave empty (press Enter)
+- **OAuth discovery URL**: 手順1の `$DISCOVERY_URL` を使用
+- **Allowed OAuth client IDs**: 空欄(Enter)
+- **Allowed OAuth audience**: 手順1の `$CLIENT_ID` を入力
+- **Allowed OAuth scopes**: 空欄(Enter)
+- **Custom claims**: 空欄(Enter)
 - **Request header allowlist**: `no`
-- **Memory**: `s` (skip)
+- **Memory**: `s`(スキップ)
 
-Then run:
+続けて実行します:
 
 ```bash
 agentcore deploy
 ```
 
-Note the Runtime ID from the output.
+出力からRuntime IDを控えておいてください。
 
-> **Important**: You need the Runtime ID (not the full ARN) for the next step. It looks like `agent_1-AbCdEf123` (the part after `runtime/` in the ARN).
+> **重要**: 次の手順では(完全なARNではなく)Runtime IDが必要です。`agent_1-AbCdEf123` のような形式です(ARNの `runtime/` の後の部分)。
 
-### 3. Deploy Amazon API Gateway
+### 3. Amazon API Gatewayをデプロイ
 
 ```bash
 aws cloudformation deploy \
@@ -128,9 +161,9 @@ aws cloudformation deploy \
   --region us-east-1
 ```
 
-> **⚠️ Common Error**: Use only the Runtime ID (e.g., `agent_1-AbCdEf123`), NOT the full ARN. Using the full ARN will cause a 404 "UnknownOperationException" error.
+> **⚠️ よくあるエラー**: Runtime IDのみを使用してください(例: `agent_1-AbCdEf123`)。完全なARNではありません。完全なARNを使うと404 "UnknownOperationException" エラーになります。
 
-Get the Amazon API Gateway endpoint:
+Amazon API Gatewayのエンドポイントを取得します:
 ```bash
 API_ENDPOINT=$(aws cloudformation describe-stacks \
   --stack-name agentcore-api \
@@ -139,9 +172,9 @@ API_ENDPOINT=$(aws cloudformation describe-stacks \
 echo "API Endpoint: $API_ENDPOINT"
 ```
 
-### 4. Update Frontend Config
+### 4. フロントエンド設定を更新
 
-Edit `frontend/index.html` and update the CONFIG section:
+`frontend/index.html` を編集し、CONFIGセクションを更新します:
 
 ```javascript
 const CONFIG = {
@@ -152,56 +185,54 @@ const CONFIG = {
 };
 ```
 
-> **Tip**: You can get all these values programmatically:
+> **Tip**: これらの値はすべてプログラムから取得できます:
 > ```bash
-> # Cognito domain (remove https://)
+> # Cognitoドメイン(https://を除く)
 > aws cloudformation describe-stacks --stack-name agentcore-cognito \
 >   --query 'Stacks[0].Outputs[?OutputKey==`CognitoDomain`].OutputValue' --output text
-> 
+>
 > # Client ID
 > aws cloudformation describe-stacks --stack-name agentcore-cognito \
 >   --query 'Stacks[0].Outputs[?OutputKey==`UserPoolClientId`].OutputValue' --output text
 > ```
 
-### 5. Test
+### 5. テスト
 
 ```bash
 cd frontend
 python3 -m http.server 8000
 ```
 
-Open http://localhost:8000 and login with `<YOUR_USERNAME_HERE>` / `<YOUR_PASSWORD_HERE>`
+http://localhost:8000 を開き、`<YOUR_USERNAME_HERE>` / `<YOUR_PASSWORD_HERE>` でログインします
 
-> **Troubleshooting**:
-> - **404 "UnknownOperationException"**: You used the full ARN instead of just the Runtime ID when deploying Amazon API Gateway. Delete the stack and redeploy with just the ID.
-> - **401 Unauthorized**: Token expired or invalid. Try logging out and back in.
-> - **CORS errors**: Ensure you're using `http://localhost:8000` (not 127.0.0.1).
+> **トラブルシューティング**:
+> - **404 "UnknownOperationException"**: Amazon API Gatewayのデプロイ時に完全なARNを使ってしまっています。スタックを削除し、IDのみで再デプロイしてください。
+> - **401 Unauthorized**: トークンが期限切れまたは無効です。ログアウトして再度ログインしてみてください。
+> - **CORSエラー**: `http://localhost:8000`(`127.0.0.1`ではない)を使用していることを確認してください。
 
-## Datadog Observability
+## Verify in Datadog
 
-**Status: done.** Same pattern as iteration-0:
-- **RUM + Logs** on `frontend/index.html` — RUM application `agentcore-sample-iteration-1`.
-- **APM + LLM/Agent Observability** on the agent (`agent_1`) via `ddtrace` + `LLMObs.enable(...)`:
-  ```bash
-  agentcore deploy \
-    --env "DD_API_KEY=${DD_API_KEY}" \
-    --env "DD_SITE=datadoghq.com" \
-    --env "DD_LLMOBS_ML_APP_NAME=agentcore-iteration-1-agent" \
-    --env "DD_ENV=sandbox" \
-    --env "DD_SERVICE=agentcore-iteration-1-agent" \
-    --env "DD_TRACE_LANGCHAIN_ENABLED=false" \
-    --env 'DD_TRACE_SAMPLING_RULES=[{"resource": "GET /ping", "sample_rate": 0}]'
-  ```
-  `DD_TRACE_LANGCHAIN_ENABLED=false` is required — see [dd-trace-py#18561](https://github.com/DataDog/dd-trace-py/issues/18561) in the root README's "Known issues / gotchas". `DD_TRACE_SAMPLING_RULES` drops AgentCore's own `GET /ping` health-check noise from APM. No Lambda in this iteration, so no cross-process trace propagation is needed.
-
-For the generic step-by-step (creating the RUM app, the exact `agent.py` code snippet, etc.), see the root [README.md → Datadog Setup Steps](../README.md#datadog-setup-steps).
-
-> Also see [`../iteration-1-otel/`](../iteration-1-otel/) — a separate copy of this iteration exploring whether AgentCore's own AWS-native OTel pipeline can be dual-shipped to Datadog *instead of* using `ddtrace` as done here.
+- **RUM** — RUM Application `agentcore-sample-iteration-1` のSessions画面で、ログイン〜チャット操作のセッションを確認します。
+- **APM + LLM Observability** — APM Trace Explorerで `service:agentcore-iteration-1-agent` を検索し、`POST /invocations` のトレースとLangGraphのLLM呼び出しスパンを確認します。
 
 ## Cleanup
 
 ```bash
 aws cloudformation delete-stack --stack-name agentcore-api
 cd agent && agentcore destroy
-# Don't delete Amazon Cognito if using other iterations
+# 他のイテレーションで使っている場合はAmazon Cognitoを削除しないこと
+```
+
+## Notes
+
+プロジェクト構成:
+```
+iteration-1/
+├── README.md
+├── api-gateway.yaml         # Amazon API Gateway + AWS WAF CloudFormationテンプレート
+├── agent/
+│   ├── agent.py             # LangGraphエージェント
+│   └── requirements.txt
+└── frontend/
+    └── index.html           # 単一ページのチャットUI
 ```

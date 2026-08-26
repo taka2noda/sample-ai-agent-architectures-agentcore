@@ -1,27 +1,82 @@
-# Iteration 3: Amazon API Gateway + AWS Lambda + LangGraph Agent hosted on Amazon Bedrock AgentCore Runtime + Memory using Amazon Bedrock AgentCore Memory
+# Iteration 3: Amazon API Gateway + AWS Lambda + Amazon Bedrock AgentCore RuntimeでホストされるLangGraphエージェント + Amazon Bedrock AgentCore Memoryによる会話記憶
 
-Full-featured chat application with conversation persistence and auto-generated conversation names.
+会話の永続化と会話名の自動生成を備えた、フル機能のチャットアプリケーション。
+
+## Overview
+
+- 実証するDatadog機能: RUM + Logs(フロントエンド)、Lambda APM(2関数、Serverless Macro)、APM + LLM/Agent Observability(エージェント)、chat Lambda → エージェント間のトレース連携
+- 技術スタック: Amazon Bedrock AgentCore Runtime上のLangGraphエージェント(Python)、AWS Lambda(chat/conversations)、Amazon API Gateway、Amazon Bedrock AgentCore Memory、Amazon DynamoDB
+
+**機能**:
+- **Amazon Cognito認証**: Amazon API Gatewayレベルでのjwt検証
+- **IAM認証**: AWS Lambda → Amazon Bedrock AgentCoreはIAMクレデンシャルを使用
+- **会話の記憶**: メッセージはAmazon Bedrock AgentCore Memoryに保存
+- **自動命名**: 最初のメッセージでエージェントが会話名を生成
+- **Amazon DynamoDB**: 会話のメタデータ(名前、タイムスタンプ)を保存
 
 ## Architecture
 
-![IAM integration with AgentCore Runtime with additional functionality for memory](../images/iteration_3.png)
+```mermaid
+flowchart LR
+    Client(["🖥️ Client<br/>(ブラウザ)"])
+    subgraph AWS["AWS"]
+        WAF["AWS WAF"]
+        APIGW["Amazon API Gateway"]
+        LambdaChat["AWS Lambda (chat)"]
+        LambdaConv["AWS Lambda (conversations)"]
+        Agent["Amazon Bedrock AgentCore Runtime<br/>(Agent sessions)"]
+        Memory["Amazon Bedrock AgentCore Memory"]
+        Dynamo["Amazon DynamoDB"]
+    end
 
+    Client --> WAF --> APIGW
+    APIGW -- "/api/chat" --> LambdaChat --> Agent
+    APIGW -- "/api/conversations" --> LambdaConv --> Memory
+    Agent --> Memory
+    Memory --> Dynamo
+    LambdaConv --> Dynamo
 
-## Features
+    RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
+    LambdaAPM["🐶 Datadog Lambda APM (2関数)<br/>設定箇所: template.yaml (Serverless Macro)"]
+    APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
+    Corr["🐶 トレース連携 (chat Lambda→Agentのみ)<br/>設定箇所: functions/chat/app.py ⇄ agent/agent.py"]
 
-- **Amazon Cognito Auth**: JWT validation at Amazon API Gateway level
-- **IAM Auth**: AWS Lambda → Amazon Bedrock AgentCore uses IAM credentials
-- **Conversation Memory**: Messages stored in Amazon Bedrock AgentCore Memory
-- **Auto-naming**: Agent generates conversation names on first message
-- **Amazon DynamoDB**: Stores conversation metadata (names, timestamps)
+    Client -. 計装 .-> RUM
+    LambdaChat -. 計装 .-> LambdaAPM
+    LambdaConv -. 計装 .-> LambdaAPM
+    Agent -. 計装 .-> APM
+    LambdaChat -.-> Corr
+    Corr -.-> Agent
+
+    style RUM fill:#632CA6,stroke:#632CA6,color:#fff
+    style LambdaAPM fill:#632CA6,stroke:#632CA6,color:#fff
+    style APM fill:#632CA6,stroke:#632CA6,color:#fff
+    style Corr fill:#632CA6,stroke:#632CA6,color:#fff
+```
+
+## Datadog設定
+
+このイテレーションには2つのLambdaがあり、エージェントを呼び出すのはそのうち1つだけです:
+
+- 有効化している機能: RUM + Logs(フロントエンド)、両方のLambda(`ChatFunction`、`ConversationsFunction`)のLambda APM、APM + LLM/Agent Observability(エージェント)、chat Lambda → エージェント呼び出しのトレース連携
+- 関連ファイル:
+  - `frontend/index.html` — RUM application `agentcore-sample-iteration-3` の初期化スニペット
+  - `agent/agent.py` — `ddtrace.llmobs.LLMObs.enable(...)` を最初のimportとして呼び出し
+  - `template.yaml` — `Transform` にあるDatadog Serverless Macro。各関数の `Environment.Variables` に `DD_SERVICE` を直接設定(下記の落とし穴を参照)
+  - `functions/chat/services/agent_service.py` ⇄ `agent/agent.py` — トレースコンテキストの手動inject/extract(`ChatFunction`のみ)
+- 必要な環境変数 / APIキー:
+  - エージェント(`agentcore deploy`実行時): iteration-2と同じ環境変数セット(`DD_LLMOBS_ML_APP_NAME`/`DD_SERVICE=agentcore-iteration-3-agent`、`DD_TRACE_LANGCHAIN_ENABLED=false`、`DD_TRACE_PROPAGATION_STYLE=datadog,tracecontext`、`/ping`除外用の`DD_TRACE_SAMPLING_RULES`)
+  - Lambda(`sam deploy`実行時): `DatadogApiKey` パラメータ
+- トレース連携は`ChatFunction`のみ: `invoke_agent_runtime` を呼ぶのはこの関数だけなので、`_datadog_trace_headers` をペイロードにinjectするのは`services/agent_service.py`のみ、それをextract/joinするのは`agent/agent.py`の`invoke()`のみです。`ConversationsFunction`はエージェントではなくAgentCore MemoryとDynamoDBに直接アクセスするため、連携すべきLangGraph実行側のピアが存在しません — Macroによる通常のLambda APMは受けますが、プロセス間のトレース連携はありません。
+- 汎用的な手順と完全なコードスニペットについては、ルートの [README.md → Datadogセットアップ手順](../README.md#datadog-setup-steps) を参照してください。
 
 ## Prerequisites
 
-- AWS CLI configured with credentials
-- SAM CLI installed ([installation guide](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html))
-- Python 3.11+ (`python3 --version` to check; use `uv python install 3.11` if needed)
+- クレデンシャル付きで設定済みのAWS CLI
+- インストール済みのSAM CLI([インストールガイド](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html))
+- Python 3.11以上(`python3 --version` で確認。必要なら `uv python install 3.11`)
 
-**Amazon Cognito must be deployed first** (from iteration-0):
+**Amazon Cognitoを先にデプロイしておく必要があります**(iteration-0から):
 
 ```bash
 cd ../iteration-0
@@ -32,13 +87,13 @@ aws cloudformation deploy \
   --region us-east-1
 ```
 
-> **Note**: If you already deployed Amazon Cognito for a previous iteration, skip this step.
+> **注記**: 前のイテレーションで既にAmazon Cognitoをデプロイ済みの場合はこの手順をスキップしてください。
 
-Also need a test user created (see iteration-0 README).
+また、テストユーザーの作成も必要です(iteration-0のREADMEを参照)。
 
-## Deployment
+## Setup / How to Run
 
-### 1. Get Execution Role ARN
+### 1. 実行ロールのARNを取得
 
 ```bash
 EXECUTION_ROLE_ARN=$(aws cloudformation describe-stacks \
@@ -48,70 +103,69 @@ EXECUTION_ROLE_ARN=$(aws cloudformation describe-stacks \
 echo "Execution Role ARN: $EXECUTION_ROLE_ARN"
 ```
 
-> **Save this ARN** - you'll paste it during agent configuration.
+> **このARNを保存してください** — エージェントの設定時に貼り付けます。
 
-### 2. Deploy Agent with Memory
+### 2. Memory付きでエージェントをデプロイ
 
 ```bash
 cd agent
 agentcore configure
 ```
 
-When prompted during configuration:
+設定時のプロンプトでは以下を入力します:
 - **Entrypoint**: `agent.py`
-- **Agent name**: `agent_3` (or press Enter for default)
-- **Requirements file**: Press Enter to use detected `requirements.txt`
-- **Deployment type**: `1` (Direct Code Deploy)
-- **Python runtime**: `2` (PYTHON_3_11)
-- **Execution role**: Paste the `$EXECUTION_ROLE_ARN` from step 1
-- **S3 bucket**: Press Enter to auto-create
-- **Configure OAuth authorizer?**: `no` (we use IAM auth - Lambda calls agent)
+- **Agent name**: `agent_3`(またはEnterでデフォルト)
+- **Requirements file**: Enterで検出された`requirements.txt`を使用
+- **Deployment type**: `1`(Direct Code Deploy)
+- **Python runtime**: `2`(PYTHON_3_11)
+- **Execution role**: 手順1で取得した `$EXECUTION_ROLE_ARN` を貼り付け
+- **S3 bucket**: Enterで自動作成
+- **Configure OAuth authorizer?**: `no`(IAM認証を使用 — LambdaがエージェントをIAMで呼び出す)
 - **Request header allowlist**: `no`
-- **Memory**: `c` (create new memory)
-  - **Memory name**: `iteration3-memory` (or any name you prefer)
+- **Memory**: `c`(新規Memoryを作成)
+  - **Memory name**: `iteration3-memory`(任意の名前でも可)
 
-> **Important**: Iteration-3 uses IAM authentication (not OAuth). The AWS Lambda calls the agent using its IAM role. Memory is required for conversation persistence.
+> **重要**: Iteration-3はIAM認証を使用します(OAuthではありません)。AWS LambdaはそのIAMロールを使ってエージェントを呼び出します。会話の永続化にはMemoryが必要です。
 
-Then deploy:
+続けてデプロイします:
 ```bash
 agentcore deploy
 ```
 
-Note the Agent ARN and Memory ID from the output:
+出力からAgent ARNとMemory IDを控えておいてください:
 - Agent ARN: `arn:aws:bedrock-agentcore:us-east-1:ACCOUNT:runtime/AGENT_ID`
-- Memory ID: `iteration3-memory-XXXXX` (the full ID including suffix)
+- Memory ID: `iteration3-memory-XXXXX`(サフィックスを含む完全なID)
 
-> **⚠️ Important**: Save both the Agent ARN and Memory ID - you'll need them for the SAM deployment.
+> **⚠️ 重要**: Agent ARNとMemory IDの両方を保存してください — SAMデプロイ時に必要になります。
 
+### 3. AWS Systems Managerパラメータを保存
 
-### 3. Store AWS Systems Manager Parameters
-
-The agent reads these at runtime to find the memory and Amazon DynamoDB table:
+エージェントは実行時にこれらを読み取り、MemoryとAmazon DynamoDBテーブルを見つけます:
 
 ```bash
-# Replace <YOUR_MEMORY_ID> with the Memory ID from agentcore deploy output
+# <YOUR_MEMORY_ID> は agentcore deploy の出力にあるMemory IDに置き換えてください
 aws ssm put-parameter --name /agentcore/memory-id --value "<YOUR_MEMORY_ID>" --type String --overwrite
 aws ssm put-parameter --name /dynamo/conversation-table --value "iteration3-conversations" --type String --overwrite
 ```
 
-> **Verify the parameters were created**:
+> **パラメータが作成されたことを確認**:
 > ```bash
 > aws ssm get-parameter --name /agentcore/memory-id --query 'Parameter.Value' --output text
 > aws ssm get-parameter --name /dynamo/conversation-table --query 'Parameter.Value' --output text
 > ```
 
-### 4. Build AWS Lambda Functions
+### 4. AWS Lambda関数をビルド
 
 ```bash
-cd ..  # Back to iteration-3 root (if still in agent/)
+cd ..  # iteration-3のルートへ戻る(まだagent/にいる場合)
 
-# Build
+# ビルド
 sam build
 ```
 
-### 5. Deploy AWS Lambda + Amazon API Gateway
+### 5. AWS Lambda + Amazon API Gatewayをデプロイ
 
-Get the Amazon Cognito ARN:
+Amazon CognitoのARNを取得します:
 ```bash
 COGNITO_ARN=$(aws cloudformation describe-stacks \
   --stack-name agentcore-cognito \
@@ -120,7 +174,7 @@ COGNITO_ARN=$(aws cloudformation describe-stacks \
 echo "Cognito ARN: $COGNITO_ARN"
 ```
 
-Deploy (replace placeholders with values from step 2):
+デプロイ(プレースホルダーを手順2の値に置き換え):
 ```bash
 sam deploy --parameter-overrides \
   "AgentCoreRuntimeArn=arn:aws:bedrock-agentcore:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:runtime/<YOUR_AGENT_RUNTIME_ID>" \
@@ -129,35 +183,35 @@ sam deploy --parameter-overrides \
   --no-confirm-changeset
 ```
 
-> **Tip**: Copy the Agent ARN and Memory ID directly from the `agentcore deploy` output to avoid formatting issues.
+> **Tip**: フォーマットの問題を避けるため、Agent ARNとMemory IDは `agentcore deploy` の出力から直接コピーしてください。
 
-> **If deployment fails with ROLLBACK_COMPLETE**: The stack is in a failed state. Delete it first:
+> **ROLLBACK_COMPLETEでデプロイが失敗する場合**: スタックが失敗状態になっています。まず削除してください:
 > ```bash
 > aws cloudformation delete-stack --stack-name iteration3
-> # Wait for deletion to complete, then retry sam deploy
+> # 削除完了を待ってから sam deploy を再実行
 > ```
 
-Note the Amazon API Gateway endpoint from the outputs.
+出力からAmazon API Gatewayのエンドポイントを控えておいてください。
 
-### 6. Update Frontend Config
+### 6. フロントエンド設定を更新
 
-Get the Amazon Cognito values from the stack:
+スタックからAmazon Cognitoの値を取得します:
 ```bash
-# Get Cognito domain
+# Cognitoドメインを取得
 COGNITO_DOMAIN=$(aws cloudformation describe-stacks \
   --stack-name agentcore-cognito \
   --query 'Stacks[0].Outputs[?OutputKey==`CognitoDomain`].OutputValue' \
   --output text)
 echo "Cognito Domain: $COGNITO_DOMAIN"
 
-# Get Client ID
+# Client IDを取得
 CLIENT_ID=$(aws cloudformation describe-stacks \
   --stack-name agentcore-cognito \
   --query 'Stacks[0].Outputs[?OutputKey==`UserPoolClientId`].OutputValue' \
   --output text)
 echo "Client ID: $CLIENT_ID"
 
-# Get API endpoint (from iteration3 stack)
+# APIエンドポイントを取得(iteration3スタックから)
 API_ENDPOINT=$(aws cloudformation describe-stacks \
   --stack-name iteration3 \
   --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' \
@@ -165,71 +219,69 @@ API_ENDPOINT=$(aws cloudformation describe-stacks \
 echo "API Endpoint: $API_ENDPOINT"
 ```
 
-Edit `frontend/index.html` and update the CONFIG section with these values:
+`frontend/index.html` を編集し、CONFIGセクションにこれらの値を設定します:
 
 ```javascript
 const CONFIG = {
-  cognitoDomain: 'apigw-agentcore-<YOUR_ACCOUNT_ID>.auth.<YOUR_REGION>.amazoncognito.com',  // from COGNITO_DOMAIN (without https://)
-  clientId: '<YOUR_CLIENT_ID>',  // from CLIENT_ID
+  cognitoDomain: 'apigw-agentcore-<YOUR_ACCOUNT_ID>.auth.<YOUR_REGION>.amazoncognito.com',  // COGNITO_DOMAINから(https://を除く)
+  clientId: '<YOUR_CLIENT_ID>',  // CLIENT_IDから
   redirectUri: 'http://localhost:8000',
-  apiEndpoint: 'https://<YOUR_API_ID>.execute-api.<YOUR_REGION>.amazonaws.com/prod'  // from API_ENDPOINT
+  apiEndpoint: 'https://<YOUR_API_ID>.execute-api.<YOUR_REGION>.amazonaws.com/prod'  // API_ENDPOINTから
 };
 ```
 
-### 7. Test
+### 7. テスト
 
 ```bash
 cd frontend
 python3 -m http.server 8000
-# Open http://localhost:8000
+# http://localhost:8000 を開く
 ```
 
-Login with your Amazon Cognito test user and send a message. The agent will:
-1. Generate a conversation name from your first message
-2. Save it to Amazon DynamoDB
-3. Display it in the sidebar
+Amazon Cognitoのテストユーザーでログインし、メッセージを送信します。エージェントは以下を行います:
+1. 最初のメッセージから会話名を生成
+2. Amazon DynamoDBに保存
+3. サイドバーに表示
 
-> **Troubleshooting**:
-> - **Conversations not appearing in sidebar**: Check that AWS Systems Manager parameters are set correctly (step 3).
-> - **500 errors**: Check Amazon CloudWatch Logs for the AWS Lambda functions. Common causes: missing AWS Systems Manager parameters, IAM permission issues.
-> - **First message slow**: Cold start for AWS Lambda + Amazon Bedrock AgentCore. Subsequent messages will be faster.
-> - **"Unable to get weather"**: The weather.gov API only works for US locations. Try asking about a US city.
+> **トラブルシューティング**:
+> - **サイドバーに会話が表示されない**: AWS Systems Managerパラメータが正しく設定されているか確認してください(手順3)。
+> - **500エラー**: AWS Lambda関数のAmazon CloudWatch Logsを確認してください。よくある原因: AWS Systems Managerパラメータの不足、IAM権限の問題。
+> - **最初のメッセージが遅い**: AWS Lambda + Amazon Bedrock AgentCoreのコールドスタートです。以降のメッセージは速くなります。
+> - **"Unable to get weather"**: weather.gov APIは米国内の地点にのみ対応しています。米国の都市名で試してください。
 
-## Datadog Observability
+## Verify in Datadog
 
-**Status: done.** This iteration has two Lambdas, only one of which calls the agent:
-- **RUM + Logs** on `frontend/index.html` — RUM application `agentcore-sample-iteration-3`.
-- **Agent (`agent_3`) APM + LLM/Agent Observability** via `ddtrace` + `LLMObs.enable(...)`, deployed with the same env vars as iteration-2 (`DD_LLMOBS_ML_APP_NAME`/`DD_SERVICE=agentcore-iteration-3-agent`, `DD_TRACE_LANGCHAIN_ENABLED=false`, `DD_TRACE_PROPAGATION_STYLE=datadog,tracecontext`, `DD_TRACE_SAMPLING_RULES` for `/ping` exclusion).
-- **Both Lambdas (`ChatFunction`, `ConversationsFunction`) get Lambda APM** via the Datadog Serverless Macro in `template.yaml`'s `Transform`.
-- **Trace correlation only for `ChatFunction`**: it's the only one that calls `invoke_agent_runtime`, so only its `services/agent_service.py` injects `_datadog_trace_headers` into the payload, and only `agent/agent.py`'s `invoke()` extracts/joins it. `ConversationsFunction` talks to AgentCore Memory and DynamoDB directly, not the agent, so there's no LangGraph-executing peer for it to correlate with — it still gets normal Lambda APM from the macro, just no cross-process trace join.
-
-For the generic step-by-step and full code snippets, see the root [README.md → Datadog Setup Steps](../README.md#datadog-setup-steps).
-
-**Gotcha specific to having two Lambdas in one template**: setting a per-function Datadog service name via `Metadata: {DatadogServerless: {service: ...}}` on each `AWS::Serverless::Function` did **not** actually set `DD_SERVICE` (confirmed with `aws lambda get-function-configuration` — the variable was simply absent). Fixed by setting `DD_SERVICE` directly as a plain `Environment.Variables` entry on each function instead — see `template.yaml`.
+- **RUM** — RUM Application `agentcore-sample-iteration-3` のSessions画面でフロントエンド操作を確認します。
+- **Lambda APM** — APM Trace Explorerで`ChatFunction`と`ConversationsFunction`両方のサービスのトレースを確認します。
+- **エージェントのAPM + LLM Observability** — `service:agentcore-iteration-3-agent` で検索し、LangGraphのLLM呼び出しスパンを確認します。
+- **トレース連携** — `/api/chat` の呼び出しでは、`ChatFunction`の`aws.lambda`スパンからエージェントの`agentcore.invoke`スパンまでが同一trace_idの1本のトレースとして繋がっていることを確認します(`/api/conversations`側はこの連携がないことも仕様として確認)。
 
 ## Cleanup
 
 ```bash
-# Delete AWS Lambda stack
+# AWS Lambdaスタックを削除
 sam delete --stack-name iteration3
 
-# Delete agent
+# エージェントを削除
 cd agent
 agentcore destroy
 
-# Delete AWS Systems Manager parameters
+# AWS Systems Managerパラメータを削除
 aws ssm delete-parameter --name /agentcore/memory-id
 aws ssm delete-parameter --name /dynamo/conversation-table
 ```
 
-> **Note**: The Amazon DynamoDB table is deleted automatically with the AWS SAM stack. Amazon Bedrock AgentCore Memory is deleted with `agentcore destroy`.
+> **注記**: Amazon DynamoDBテーブルはAWS SAMスタックとともに自動的に削除されます。Amazon Bedrock AgentCore Memoryは`agentcore destroy`で削除されます。
 
-## File Structure
+## Notes
 
+**構築時に遭遇した既知の落とし穴**: 1つのテンプレートに2つのLambdaがある場合特有の落とし穴として、各 `AWS::Serverless::Function` に `Metadata: {DatadogServerless: {service: ...}}` で関数ごとのDatadogサービス名を設定しても、実際には `DD_SERVICE` は設定されませんでした(`aws lambda get-function-configuration` で確認 — 変数が単純に存在していなかった)。代わりに各関数の `Environment.Variables` に `DD_SERVICE` を直接設定することで修正しました — `template.yaml` を参照してください。
+
+**ファイル構成**:
 ```
 iteration-3/
-├── agent/                      # Amazon Bedrock AgentCore Runtime agent
-│   ├── agent.py               # Agent with conversation naming
+├── agent/                      # Amazon Bedrock AgentCore Runtimeエージェント
+│   ├── agent.py               # 会話命名機能付きエージェント
 │   └── requirements.txt
 ├── functions/
 │   ├── chat/                  # Chat AWS Lambda
@@ -244,26 +296,26 @@ iteration-3/
 │           └── conversation_service.py
 ├── frontend/
 │   └── index.html
-├── template.yaml              # AWS SAM template
+├── template.yaml              # AWS SAMテンプレート
 └── samconfig.toml
 ```
 
-## API Endpoints
+**APIエンドポイント**:
 
-| Method | Path | Description |
+| メソッド | パス | 説明 |
 |--------|------|-------------|
-| POST | /api/chat | Send message to agent |
-| GET | /api/conversations | List conversations (from Amazon DynamoDB) |
-| GET | /api/conversations/{session_id} | Get messages (from Amazon Bedrock AgentCore Memory) |
+| POST | /api/chat | エージェントへメッセージを送信 |
+| GET | /api/conversations | 会話一覧を取得(Amazon DynamoDBから) |
+| GET | /api/conversations/{session_id} | メッセージを取得(Amazon Bedrock AgentCore Memoryから) |
 
-## Data Flow
+**データフロー**:
 
-1. **Chat**: Frontend → Amazon API Gateway → Chat AWS Lambda → Amazon Bedrock AgentCore Runtime
-   - Agent checks if new conversation, generates name, saves to Amazon DynamoDB
-   - Agent processes message with memory context
-   
-2. **List Conversations**: Frontend → Amazon API Gateway → Conversations AWS Lambda → Amazon DynamoDB
-   - Returns conversation names scoped to actor_id
+1. **チャット**: フロントエンド → Amazon API Gateway → Chat AWS Lambda → Amazon Bedrock AgentCore Runtime
+   - エージェントが新規会話かどうかを判定し、名前を生成してAmazon DynamoDBに保存
+   - エージェントがメモリのコンテキストを使ってメッセージを処理
 
-3. **Get Messages**: Frontend → Amazon API Gateway → Conversations AWS Lambda → Amazon Bedrock AgentCore Memory
-   - Returns message history for session_id + actor_id
+2. **会話一覧の取得**: フロントエンド → Amazon API Gateway → Conversations AWS Lambda → Amazon DynamoDB
+   - actor_idに紐づく会話名を返す
+
+3. **メッセージの取得**: フロントエンド → Amazon API Gateway → Conversations AWS Lambda → Amazon Bedrock AgentCore Memory
+   - session_id + actor_idに対応するメッセージ履歴を返す

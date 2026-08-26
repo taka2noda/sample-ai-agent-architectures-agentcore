@@ -1,0 +1,6 @@
+bedrock-agentcore
+langchain
+langchain-aws
+langgraph
+boto3
+ddtrace

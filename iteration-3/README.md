@@ -39,7 +39,7 @@ flowchart LR
     RUM["🐶 Datadog RUM + Logs<br/>設定箇所: frontend/index.html"]
     LambdaAPM["🐶 Datadog Lambda APM (2関数)<br/>設定箇所: template.yaml (Serverless Macro)"]
     APM["🐶 Datadog APM + LLM Observability<br/>設定箇所: agent/agent.py (ddtrace)"]
-    Corr["🐶 トレース連携 (chat Lambda→Agentのみ)<br/>設定箇所: functions/chat/app.py ⇄ agent/agent.py"]
+    Corr["🐶 トレース連携 (chat Lambda→Agentのみ)<br/>設定箇所: functions/chat/services/agent_service.py ⇄ agent/agent.py"]
 
     Client -. 計装 .-> RUM
     LambdaChat -. 計装 .-> LambdaAPM

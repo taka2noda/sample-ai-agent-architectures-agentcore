@@ -55,7 +55,7 @@ flowchart LR
   - `frontend/index.html` — RUM application `agentcore-sample-iteration-2` の初期化スニペット
   - `agent/agent.py` — `ddtrace.llmobs.LLMObs.enable(...)` を最初のimportとして呼び出し
   - `template.yaml` — `Transform` に追加した [Datadog Serverless Macro](https://docs.datadoghq.com/serverless/libraries_integrations/macro/)
-  - `lambda/services/agent_service.py`(実体は`lambda/app.py`/そのサービスモジュール) ⇄ `agent/agent.py` — トレースコンテキストの手動inject/extract
+  - `lambda/app.py` ⇄ `agent/agent.py` — トレースコンテキストの手動inject/extract
 - 必要な環境変数 / APIキー:
   - エージェント(`agentcore deploy`実行時):
     ```bash
@@ -70,7 +70,7 @@ flowchart LR
       --env 'DD_TRACE_SAMPLING_RULES=[{"resource": "GET /ping", "sample_rate": 0}]'
     ```
   - Lambda(`sam deploy`実行時): `--parameter-overrides ... "DatadogApiKey=${DD_API_KEY}"`
-- Lambda → エージェント呼び出しを越えたトレース連携: `lambda/services/agent_service.py` が、現在のDatadogトレースコンテキストを `invoke_agent_runtime` のペイロードに `_datadog_trace_headers` としてinjectします。`agent/agent.py` はそれをextractし、LangGraphエージェントを呼び出す前に本物の子スパン(`tracer.start_span(child_of=..., activate=True)`)を開きます(コンテキストがない場合は `contextlib.nullcontext()` でラップ)。LambdaのAWSトレース(`aws.lambda`スパン)とエージェントの`agentcore.invoke`スパンが同一trace_idの下に着弾することを確認済みです。
+- Lambda → エージェント呼び出しを越えたトレース連携: `lambda/app.py` が、現在のDatadogトレースコンテキストを `invoke_agent_runtime` のペイロードに `_datadog_trace_headers` としてinjectします。`agent/agent.py` はそれをextractし、LangGraphエージェントを呼び出す前に本物の子スパン(`tracer.start_span(child_of=..., activate=True)`)を開きます(コンテキストがない場合は `contextlib.nullcontext()` でラップ)。LambdaのAWSトレース(`aws.lambda`スパン)とエージェントの`agentcore.invoke`スパンが同一trace_idの下に着弾することを確認済みです。
 - 汎用的な手順と完全なコードスニペットについては、ルートの [README.md → Datadogセットアップ手順](../README.md#datadog-setup-steps) を参照してください。
 
 ## Prerequisites

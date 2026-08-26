@@ -366,7 +366,7 @@ Browser → Amazon Bedrock AgentCore Runtime (Amazon CognitoによるOAuth)
 - 最もシンプルな構成
 - ブラウザがAmazon Bedrock AgentCoreを直接呼び出す
 - 認証はAmazon Cognito OAuth
-- **Datadog**: フロントエンドにRUM+Logs、エージェントにAPM + LLM Observability
+- **Datadog設定**: フロントエンドにRUM+Logs、エージェントにAPM + LLM Observability
 
 [Iteration 0を見る →](./iteration-0/)
 
@@ -383,7 +383,7 @@ Browser → Amazon API Gateway → Amazon Bedrock AgentCore Runtime (OAuth)
 - Amazon API Gatewayに Amazon Cognito authorizer を設定
 - OAuth JWTをAmazon Bedrock AgentCoreへパススルー
 - **セキュリティ上の注記**: ユーザーのJWTがAPIとエージェントの両方に使えてしまう — 本番環境には不向き
-- **Datadog**: フロントエンドにRUM+Logs、エージェントにAPM + LLM Observability
+- **Datadog設定**: フロントエンドにRUM+Logs、エージェントにAPM + LLM Observability
 
 [Iteration 1を見る →](./iteration-1/)
 
@@ -400,7 +400,7 @@ Browser → Amazon API Gateway → AWS Lambda → Amazon Bedrock AgentCore Runti
 - エージェントはIAM認証を使用 — ユーザーはAPIを迂回してエージェントを直接呼び出せない
 - Amazon Cognitoによる検証はAmazon API Gatewayレベルのみ
 - Iteration 1のセキュリティ上のギャップを修正
-- **Datadog**: フロントエンドにRUM+Logs、Datadog Serverless Macro経由のLambda APM、エージェントにAPM + LLM Observability、Lambda → AgentCore呼び出しを越えたトレース連携
+- **Datadog設定**: フロントエンドにRUM+Logs、Datadog Serverless Macro経由のLambda APM、エージェントにAPM + LLM Observability、Lambda → AgentCore呼び出しを越えたトレース連携
 
 [Iteration 2を見る →](./iteration-2/)
 
@@ -417,7 +417,7 @@ Browser → Amazon API Gateway → AWS Lambda (Chat) → Amazon Bedrock AgentCor
 - 会話の永続化にAmazon Bedrock AgentCore Memoryを使用
 - 会話のメタデータ(名前)にAmazon DynamoDBを使用
 - 会話名を自動生成
-- **Datadog**: フロントエンドにRUM+Logs、両方のLambdaにDatadog Serverless Macro経由のLambda APM、エージェントにAPM + LLM Observability、chat Lambda → AgentCore呼び出しを越えたトレース連携(エージェントを呼ぶのは`chat` Lambdaのみ。`conversations`はAgentCore Memory/DynamoDBに直接アクセスするため連携は不要)
+- **Datadog設定**: フロントエンドにRUM+Logs、両方のLambdaにDatadog Serverless Macro経由のLambda APM、エージェントにAPM + LLM Observability、chat Lambda → AgentCore呼び出しを越えたトレース連携(エージェントを呼ぶのは`chat` Lambdaのみ。`conversations`はAgentCore Memory/DynamoDBに直接アクセスするため連携は不要)
 
 [Iteration 3を見る →](./iteration-3/)
 
@@ -503,10 +503,13 @@ aws cognito-idp admin-set-user-password \
 
 ```
 .
-├── iteration-0/        # ブラウザから直接Amazon Bedrock AgentCoreへ
-├── iteration-1/        # Amazon API Gateway + Amazon Bedrock AgentCore (OAuth)
-├── iteration-2/        # Amazon API Gateway + AWS Lambda + Amazon Bedrock AgentCore (IAM)
-└── iteration-3/        # AWS Lambda + Amazon Bedrock AgentCore with Memory
+├── iteration-0/                        # ブラウザから直接Amazon Bedrock AgentCoreへ
+├── iteration-1/                        # Amazon API Gateway + Amazon Bedrock AgentCore (OAuth)
+├── iteration-1-otel/                   # iteration-1のバリアント: OTel経由でAWS X-Rayと同時にDatadogへdual-ship
+├── iteration-1-llmobs-env/             # iteration-1のバリアント: sitecustomize.py方式でagent.py無変更のDatadog有効化
+├── iteration-1-container-ddtrace-run/  # iteration-1のバリアント: DockerfileのCMD編集方式でagent.py無変更のDatadog有効化
+├── iteration-2/                        # Amazon API Gateway + AWS Lambda + Amazon Bedrock AgentCore (IAM)
+└── iteration-3/                        # AWS Lambda + Amazon Bedrock AgentCore with Memory
 ```
 
 ## セキュリティ

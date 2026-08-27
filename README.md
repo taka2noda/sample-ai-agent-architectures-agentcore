@@ -442,6 +442,19 @@ iteration-1のコピーを2つ使い、`agent.py`に一切`ddtrace`/`LLMObs`関�
 
 [Iteration 1(sitecustomize方式)を見る →](./iteration-1-llmobs-env/) / [Iteration 1(Dockerfile方式)を見る →](./iteration-1-container-ddtrace-run/)
 
+#### Iteration 1の4バリアント比較
+
+AWS構成(Browser → Amazon API Gateway → Amazon Bedrock AgentCore Runtime)は共通で、**Datadog Agent Observabilityの有効化方法だけが異なる**4つのバリアントです。
+
+| バリアント | Datadog Agent Observabilityの有効化方法 | `agent/agent.py`へのコード変更 | `deployment_type` |
+|---|---|---|---|
+| [iteration-1](./iteration-1/) | **Agent Obs: in-code setup** — `agent.py`の先頭で`LLMObs.enable(...)`を直接呼び出す(標準的な方式) | あり(`ddtrace`のimportと`LLMObs.enable(...)`呼び出しを追加) | `direct_code_deploy` |
+| [iteration-1-otel](./iteration-1-otel/) | **OTel Export** — `ddtrace`を使わず、OpenTelemetry SDKでAWS X-RayとDatadogの両方へ直接OTLP dual-ship | あり(OpenTelemetry SDKのセットアップコード) | `direct_code_deploy` |
+| [iteration-1-llmobs-env](./iteration-1-llmobs-env/) | **Agent Obs: env setup** *Fixed — `sitecustomize.py`(1行)+ `PYTHONPATH=.`環境変数のみで有効化 | **なし** | `direct_code_deploy` |
+| [iteration-1-container-ddtrace-run](./iteration-1-container-ddtrace-run/) | **Agent Obs: container run** *Fixed — デプロイ用`Dockerfile`の`CMD`に`ddtrace-run`を前置するのみ | **なし** | `container` |
+
+*Fixed = 「`agent.py`にDatadog関連コードを一切書かずに有効化できるか?」という問いに対して、実際にデプロイして動作確認まで完了しているバリアント。
+
 ## 前提条件
 
 - AWS CLIがクレデンシャル付きで設定済み(`aws configure`)

@@ -398,6 +398,36 @@ Browser → Amazon API Gateway → Amazon Bedrock AgentCore Runtime (OAuth)
 
 [Iteration 1を見る →](./iteration-1/)
 
+#### Iteration 1(OTel版): OpenTelemetry経由でAWS CloudWatch/X-Rayと*同時に*Datadogへも送信
+
+**適した用途**: 「Datadogネイティブのトレーサーの代わりにOTelでAWSとDatadogの両方にテレメトリを送れるか?」という問いに答える。
+
+iteration-1のコピー(デプロイ済みエージェントには影響しません)を使い、AgentCore自身のOTelベースのObservabilityパイプラインをDatadogへの送信にも拡張できるかを調査したものです。結論を先に言うと、拡張できる既存のin-processパイプラインは存在しません(実証的に確認済み — in-processの`TracerProvider`もローカルOTLPコレクタも存在しない)が、アプリ自身がOpenTelemetry SDKのセットアップを持ち、コレクタを介さない独立した2つの直接OTLPエンドポイント(AWS X-RayとDatadog)へfan-outすることで、実際のdual-shipは可能です。詳しい調査内容・動作するコードパターン・落とし穴は、そのフォルダのREADMEを参照してください。
+
+- **Datadog Agent Observabilityの有効化方法**: OTel Export(`ddtrace`は使わず、OpenTelemetry SDKでdual-ship)
+
+[Iteration 1(OTel版)を見る →](./iteration-1-otel/)
+
+#### Iteration 1(env setup版): `agent.py`を変更せず環境変数だけでDatadog ddtrace/LLM Observabilityを有効化
+
+**適した用途**: 「`LLMObs.enable(...)`をコードに書く代わりに、環境変数だけでDatadogを有効化できないか?」という問いに答える。
+
+iteration-1のコピー(`deployment_type: direct_code_deploy`。iteration-0/1/2/3が実際に使っている方式)を使い、`agent.py`に一切`ddtrace`/`LLMObs`関連のコードを書かずにDatadog APM + LLM Observabilityを有効化できるかを検証したものです。`sitecustomize.py`(1行: `import ddtrace.auto`)を`agent.py`の隣に置き、`PYTHONPATH=.`を環境変数として渡す方式で、実際にデプロイしてCloudWatchログとDatadog APMの両方でエンドツーエンドの動作を確認済みです。
+
+- **Datadog Agent Observabilityの有効化方法**: Agent Obs env setup(`agent.py`へのコード変更なし)
+
+[Iteration 1(sitecustomize方式)を見る →](./iteration-1-llmobs-env/)
+
+#### Iteration 1(container run版): Dockerfileの`CMD`編集で`agent.py`を変更せずにDatadog ddtrace/LLM Observabilityを有効化
+
+**適した用途**: 「`deployment_type: container`のエージェントで、Dockerfileの編集だけでDatadogを有効化できないか?」という問いに答える。
+
+iteration-1のコピー(`deployment_type: container`)を使い、デプロイ用`Dockerfile`の`CMD`に`ddtrace-run`を前置する方式で、`agent.py`に一切`ddtrace`/`LLMObs`関連のコードを書かずにDatadog APM + LLM Observabilityを有効化できるかを検証したものです(ただしDockerfileが存在するcontainerデプロイでしか使えない)。実際にデプロイしてCloudWatchログとDatadog APMの両方でエンドツーエンドの動作を確認済みです。
+
+- **Datadog Agent Observabilityの有効化方法**: Agent Obs container run(`agent.py`へのコード変更なし)
+
+[Iteration 1(Dockerfile方式)を見る →](./iteration-1-container-ddtrace-run/)
+
 ### Iteration 2: Amazon API Gateway + AWS Lambda + Amazon Bedrock AgentCore(IAM認証)
 
 **適した用途**: 独自のコンピュート層を持つ、セキュアな本番構成。
@@ -431,29 +461,6 @@ Browser → Amazon API Gateway → AWS Lambda (Chat) → Amazon Bedrock AgentCor
 - **Datadog設定**: フロントエンドにRUM+Logs、両方のLambdaにDatadog Serverless Macro経由のLambda APM、エージェントにAPM + LLM Observability、chat Lambda → AgentCore呼び出しを越えたトレース連携(エージェントを呼ぶのは`chat` Lambdaのみ。`conversations`はAgentCore Memory/DynamoDBに直接アクセスするため連携は不要)
 
 [Iteration 3を見る →](./iteration-3/)
-
-### Iteration 1(OTel版): OpenTelemetry経由でAWS CloudWatch/X-Rayと*同時に*Datadogへも送信
-
-**適した用途**: 「Datadogネイティブのトレーサーの代わりにOTelでAWSとDatadogの両方にテレメトリを送れるか?」という問いに答える。
-
-iteration-1のコピー(デプロイ済みエージェントには影響しません)を使い、AgentCore自身のOTelベースのObservabilityパイプラインをDatadogへの送信にも拡張できるかを調査したものです。結論を先に言うと、拡張できる既存のin-processパイプラインは存在しません(実証的に確認済み — in-processの`TracerProvider`もローカルOTLPコレクタも存在しない)が、アプリ自身がOpenTelemetry SDKのセットアップを持ち、コレクタを介さない独立した2つの直接OTLPエンドポイント(AWS X-RayとDatadog)へfan-outすることで、実際のdual-shipは可能です。詳しい調査内容・動作するコードパターン・落とし穴は、そのフォルダのREADMEを参照してください。
-
-[Iteration 1(OTel版)を見る →](./iteration-1-otel/)
-
-### Iteration 1(検証版): `agent.py`を変更せずにDatadog ddtrace/LLM Observabilityを有効化する2つの方式
-
-**適した用途**: 「`LLMObs.enable(...)`をコードに書く代わりに、設定・環境変数だけでDatadogを有効化できないか?」という問いに答える。
-
-iteration-1のコピーを2つ使い、`agent.py`に一切`ddtrace`/`LLMObs`関連のコードを書かずにDatadog APM + LLM Observabilityを有効化できるかを検証したものです。デプロイ方式(`deployment_type`)によって成立する方法が異なることを確認しています:
-
-- **`iteration-1-llmobs-env/`**(`deployment_type: direct_code_deploy`。iteration-0/1/2/3が実際に使っている方式): `sitecustomize.py`(1行: `import ddtrace.auto`)を`agent.py`の隣に置き、`PYTHONPATH=.`を環境変数として渡す方式で動作確認済み。
-- **`iteration-1-container-ddtrace-run/`**(`deployment_type: container`): デプロイ用`Dockerfile`の`CMD`に`ddtrace-run`を前置する方式で動作確認済み(ただしDockerfileが存在するcontainerデプロイでしか使えない)。
-
-どちらも実際にデプロイし、CloudWatchログとDatadog APMの両方でエンドツーエンドの動作を確認済みです。詳細は各フォルダのREADMEを参照してください。
-
-[Iteration 1(sitecustomize方式)を見る →](./iteration-1-llmobs-env/) / [Iteration 1(Dockerfile方式)を見る →](./iteration-1-container-ddtrace-run/)
-
-> Iteration 1には、Datadog Agent Observabilityの有効化方法が異なる4つの版があります。比較表は[このリポジトリの使い方](#how-to-use-this-repository)を参照してください。
 
 ## 前提条件
 

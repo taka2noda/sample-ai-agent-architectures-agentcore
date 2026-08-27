@@ -55,8 +55,8 @@ flowchart LR
   ```
   `DD_TRACE_LANGCHAIN_ENABLED=false` は必須です — ルートREADMEの「既知の問題・落とし穴」内の [dd-trace-py#18561](https://github.com/DataDog/dd-trace-py/issues/18561) を参照してください。`DD_TRACE_SAMPLING_RULES` はAgentCore自身の `GET /ping` ヘルスチェックのノイズをAPMから除外します。このイテレーションにはLambdaがないため、プロセス間のトレース伝播は不要です。
 - 汎用的な手順(RUM appの作成、`agent.py` の正確なコードスニペットなど)については、ルートの [README.md → Datadogセットアップ手順](../README.md#datadog-setup-steps) を参照してください。
-- 関連する別バリアント:
-  - [`../iteration-1-otel/`](../iteration-1-otel/) — AgentCore自身のAWSネイティブなOTelパイプラインを、ここで使っている`ddtrace`の*代わりに*Datadogへdual-shipできるかを調査したバリアント
+- 関連する別の版:
+  - [`../iteration-1-otel/`](../iteration-1-otel/) — AgentCore自身のAWSネイティブなOTelパイプラインを、ここで使っている`ddtrace`の*代わりに*Datadogへdual-shipできるかを調査した版
   - [`../iteration-1-llmobs-env/`](../iteration-1-llmobs-env/)(`sitecustomize.py`方式)、[`../iteration-1-container-ddtrace-run/`](../iteration-1-container-ddtrace-run/)(Dockerfile方式) — `agent.py`に一切ddtrace/LLMObsのコードを書かずに済ませる方式の検証
 
 ## Prerequisites

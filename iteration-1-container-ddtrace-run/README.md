@@ -1,6 +1,6 @@
 # Iteration 1 (container variant): Dockerfile の CMD に ddtrace-run を追記する方式
 
-`deployment_type: container` のAgentCoreエージェントで、デプロイ用`Dockerfile`の`CMD`に`ddtrace-run`を前置することで、アプリコード変更なしにDatadog APM + LLM Observabilityを有効化できるかを検証したバリアント。
+`deployment_type: container` のAgentCoreエージェントで、デプロイ用`Dockerfile`の`CMD`に`ddtrace-run`を前置することで、アプリコード変更なしにDatadog APM + LLM Observabilityを有効化できるかを検証した版。
 
 ## Overview
 

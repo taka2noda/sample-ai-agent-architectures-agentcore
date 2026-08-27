@@ -1,6 +1,6 @@
-# Iteration 1(OTelバリアント): OpenTelemetry経由でAWS CloudWatch/X-Rayと*同時に*Datadogへもdual-ship
+# Iteration 1(OTel版): OpenTelemetry経由でAWS CloudWatch/X-Rayと*同時に*Datadogへもdual-ship
 
-Datadogネイティブの`ddtrace`ライブラリの代わりに、OpenTelemetry経由でAWS CloudWatch/X-RayとDatadogの両方に同じトレースを送れるかを検証したバリアント。
+Datadogネイティブの`ddtrace`ライブラリの代わりに、OpenTelemetry経由でAWS CloudWatch/X-RayとDatadogの両方に同じトレースを送れるかを検証した版。
 
 ## Overview
 

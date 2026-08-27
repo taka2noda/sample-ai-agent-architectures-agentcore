@@ -1,6 +1,6 @@
 # Iteration 1 (LLMObs env-only variant): `agent.py` に一切手を加えずに ddtrace/LLM Observability を有効化する
 
-`agent.py`に`ddtrace`/`LLMObs`関連のコードを一切追加せず、`direct_code_deploy`のAgentCoreエージェントでDatadog APM + LLM Observabilityを有効化できるかを検証したバリアント。
+`agent.py`に`ddtrace`/`LLMObs`関連のコードを一切追加せず、`direct_code_deploy`のAgentCoreエージェントでDatadog APM + LLM Observabilityを有効化できるかを検証した版。
 
 ## Overview
 

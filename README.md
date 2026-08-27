@@ -335,7 +335,9 @@ response = client.invoke_agent_runtime(
 )
 ```
 
-エージェント側(`agent/agent.py`)では、それをextractし、LangGraphエージェントを呼び出す前に**本物の子スパン**を開きます — extractしたコンテキストに対して単に `tracer.context_provider.activate(...)` するだけでは*不十分*です(下記の落とし穴を参照):
+エージェント側(`agent/agent.py`)では、それをextractし、LangGraphエージェントを呼び出す前に**本物の子スパン**(`tracer.start_span(child_of=..., activate=True)`)を明示的に開きます。
+
+> **なぜ`tracer.context_provider.activate(...)`だけでは不十分なのか**: `activate(...)`は「これから作られるスパンの親はこのコンテキストですよ」と現在のスレッドに設定するだけで、それ自体はスパン(実際のトレースデータの単位)を作りません。一方でLangGraphの実行エンジン(Pregelランタイム)は、各ステップを`concurrent.futures.ThreadPoolExecutor`という仕組みで**別のスレッド**上で実行します。ddtraceがスレッドをまたいで自動的に引き継げるのは、実際に生成された(=`start_span`で作られた)Spanオブジェクトだけで、`activate`しただけの「スパンなしのコンテキスト」はスレッドの境界を越えられません。そのため、LangGraph呼び出しの前に`start_span(child_of=dd_context, activate=True)`で本物のスパンを1つ作っておく必要があります。こうすることで、そのスパンがどのスレッドに引き継がれても、LangGraph内部の処理が正しく子スパンとして記録されます。
 
 ```python
 import contextlib

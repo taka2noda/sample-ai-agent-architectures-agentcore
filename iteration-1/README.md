@@ -58,6 +58,7 @@ flowchart LR
 - 関連する別の版:
   - [`../iteration-1-otel/`](../iteration-1-otel/) — AgentCore自身のAWSネイティブなOTelパイプラインを、ここで使っている`ddtrace`の*代わりに*Datadogへdual-shipできるかを調査した版
   - [`../iteration-1-llmobs-env/`](../iteration-1-llmobs-env/)(`sitecustomize.py`方式)、[`../iteration-1-container-ddtrace-run/`](../iteration-1-container-ddtrace-run/)(Dockerfile方式) — `agent.py`に一切ddtrace/LLMObsのコードを書かずに済ませる方式の検証
+  - [`../iteration-1-mcp-datadog/`](../iteration-1-mcp-datadog/) — エージェントをDatadogで観測するのではなく、逆にエージェント自身がDatadog MCP ServerをSAT認証で利用してツール呼び出しを行う構成
 
 ## Prerequisites
 

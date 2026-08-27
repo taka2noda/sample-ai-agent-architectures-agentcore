@@ -430,6 +430,16 @@ iteration-1のコピー(`deployment_type: container`)を使い、デプロイ用
 
 [Iteration 1(Dockerfile方式)を見る →](./iteration-1-container-ddtrace-run/)
 
+#### Iteration 1(MCP版): Datadog MCP ServerをSAT認証でエージェントのツールとして利用
+
+**適した用途**: 「エージェントにDatadogを計装するだけでなく、Datadogのモニター・インシデント・ログなどをエージェント自身がMCP経由で照会できるようにしたい」場合。
+
+これまでのIteration 1の版はすべて「エージェントをDatadogで観測する」話でしたが、この版は逆方向です — iteration-1のコピーに`langchain-mcp-adapters`のMCPクライアントを組み込み、Datadog MCP Server(`https://mcp.<DD_SITE>/api/unstable/mcp-server/mcp`)にService Account Token(SAT)でBearer認証して接続し、取得したツールをLangGraphエージェントに追加します。通常のAPIキー/アプリケーションキーではこのエンドポイントは認証できず、SATが必須であることを実際に確認しています。
+
+- **接続方法**: `agent/agent.py`が`MultiServerMCPClient`でMCP Serverに接続し、既存のローカルツールと合わせてエージェントに渡す。`DD_MCP_TOKEN`未設定時はMCPツールなしで動作するフォールバックあり
+
+[Iteration 1(MCP版)を見る →](./iteration-1-mcp-datadog/)
+
 ### Iteration 2: Amazon API Gateway + AWS Lambda + Amazon Bedrock AgentCore(IAM認証)
 
 **適した用途**: 独自のコンピュート層を持つ、セキュアな本番構成。

@@ -22,7 +22,7 @@ flowchart LR
     APIGW["Amazon API Gateway"]
 
     subgraph Build["CodeBuild(クラウドビルド、ローカルDocker不要)"]
-        Dockerfile["🐶 agent/Dockerfile 最終行<br/>CMD [&quot;ddtrace-run&quot;, &quot;python&quot;, &quot;-m&quot;, &quot;agent&quot;]"]
+        Dockerfile["🐶 agent/Dockerfile 最終行<br/>CMD: ddtrace-run python -m agent"]
     end
 
     subgraph Runtime["Amazon Bedrock AgentCore Runtime<br/>(deployment_type: container)"]

@@ -6,7 +6,7 @@
 
 > **これはフォークです**。元は [aws-samples/sample-ai-agent-architectures-agentcore](https://github.com/aws-samples/sample-ai-agent-architectures-agentcore) で、各AWSアーキテクチャパターンの上に **Datadogによるオブザーバビリティ**(RUM、APM、LLM/Agent Observability)を追加しています。追加した内容と既知の問題については、下記の [Datadog Observability](#datadog-observability-this-fork) を参照してください。
 
-## このリポジトリの使い方
+## <a id="how-to-use-this-repository"></a>このリポジトリの使い方
 
 このリポジトリは、最もシンプル(だが最も安全性が低い)なパターンから始めて、セキュリティと機能のレイヤーを段階的に追加していく順番で読み進めることを想定しています。
 
@@ -56,6 +56,17 @@ flowchart LR
     style RUM fill:#632CA6,stroke:#632CA6,color:#fff
     style APM fill:#632CA6,stroke:#632CA6,color:#fff
 ```
+
+   Iteration 1には、AWS構成は共通のまま**Datadog Agent Observabilityの有効化方法だけが異なる**4つの版があります:
+
+   | 版 | Datadog Agent Observabilityの有効化方法 | `agent/agent.py`へのコード変更 | `deployment_type` |
+   |---|---|---|---|
+   | [iteration-1](./iteration-1/) | **Agent Obs: in-code setup** — `agent.py`の先頭で`LLMObs.enable(...)`を直接呼び出す(標準的な方式) | あり(`ddtrace`のimportと`LLMObs.enable(...)`呼び出しを追加) | `direct_code_deploy` |
+   | [iteration-1-otel](./iteration-1-otel/) | **OTel Export** — `ddtrace`を使わず、OpenTelemetry SDKでAWS X-RayとDatadogの両方へ直接OTLP dual-ship | あり(OpenTelemetry SDKのセットアップコード) | `direct_code_deploy` |
+   | [iteration-1-llmobs-env](./iteration-1-llmobs-env/) | **Agent Obs: env setup** *Fixed — `sitecustomize.py`(1行)+ `PYTHONPATH=.`環境変数のみで有効化 | **なし** | `direct_code_deploy` |
+   | [iteration-1-container-ddtrace-run](./iteration-1-container-ddtrace-run/) | **Agent Obs: container run** *Fixed — デプロイ用`Dockerfile`の`CMD`に`ddtrace-run`を前置するのみ | **なし** | `container` |
+
+   *Fixed = 「`agent.py`にDatadog関連コードを一切書かずに有効化できるか?」という問いに対して、実際にデプロイして動作確認まで完了している版。詳細は[イテレーション一覧](#iteration-list)、または各フォルダのREADMEを参照してください。
 
 3. **Iteration 2に進み**、IAM認証に切り替えることでこのセキュリティ上のギャップを修正します。ユーザーはAmazon Cognitoを使ってAmazon API Gatewayに認証しますが、AWS LambdaはIAMクレデンシャルを使ってエージェントを呼び出します。ユーザーはAPIを迂回できなくなります。
 
@@ -353,7 +364,7 @@ with span_ctx:
 - **AgentCore自身のOTelベースのObservabilityとDatadogのddtraceは、互いに独立して並行動作します** — `agentcore deploy` はすべてのエージェントに対して、AWSネイティブなOTelパイプライン(X-Ray / CloudWatch GenAI Observability Dashboard)を自動で有効化します。ddtraceはこれを検知し、明示的にそれを使わない(代わりに自身のネイティブな計装にフォールバックする)ため、2つは別々の連携しないトレースを生成します。両方が実際にライブデータを受信していること(単に「設定されている」だけでないこと)を `aws xray get-trace-summaries`/`batch-get-traces` で確認済みです。
 - **AgentCore CLIは`@aws/agentcore`への移行に伴い非推奨化されています**: 本リポジトリ(およびこのフォークの計装)は `bedrock-agentcore-starter-toolkit`(`pip install bedrock-agentcore`)を使用しており、コマンド実行ごとに非推奨の通知が表示されます。`AGENTCORE_SUPPRESS_RECOMMENDATION=1` を設定すると抑制できます。
 
-## イテレーション一覧
+## <a id="iteration-list"></a>イテレーション一覧
 
 ### Iteration 0: ブラウザから直接Amazon Bedrock AgentCoreへ
 
@@ -442,18 +453,7 @@ iteration-1のコピーを2つ使い、`agent.py`に一切`ddtrace`/`LLMObs`関�
 
 [Iteration 1(sitecustomize方式)を見る →](./iteration-1-llmobs-env/) / [Iteration 1(Dockerfile方式)を見る →](./iteration-1-container-ddtrace-run/)
 
-#### Iteration 1の4つの版の比較
-
-AWS構成(Browser → Amazon API Gateway → Amazon Bedrock AgentCore Runtime)は共通で、**Datadog Agent Observabilityの有効化方法だけが異なる**4つの版です。
-
-| 版 | Datadog Agent Observabilityの有効化方法 | `agent/agent.py`へのコード変更 | `deployment_type` |
-|---|---|---|---|
-| [iteration-1](./iteration-1/) | **Agent Obs: in-code setup** — `agent.py`の先頭で`LLMObs.enable(...)`を直接呼び出す(標準的な方式) | あり(`ddtrace`のimportと`LLMObs.enable(...)`呼び出しを追加) | `direct_code_deploy` |
-| [iteration-1-otel](./iteration-1-otel/) | **OTel Export** — `ddtrace`を使わず、OpenTelemetry SDKでAWS X-RayとDatadogの両方へ直接OTLP dual-ship | あり(OpenTelemetry SDKのセットアップコード) | `direct_code_deploy` |
-| [iteration-1-llmobs-env](./iteration-1-llmobs-env/) | **Agent Obs: env setup** *Fixed — `sitecustomize.py`(1行)+ `PYTHONPATH=.`環境変数のみで有効化 | **なし** | `direct_code_deploy` |
-| [iteration-1-container-ddtrace-run](./iteration-1-container-ddtrace-run/) | **Agent Obs: container run** *Fixed — デプロイ用`Dockerfile`の`CMD`に`ddtrace-run`を前置するのみ | **なし** | `container` |
-
-*Fixed = 「`agent.py`にDatadog関連コードを一切書かずに有効化できるか?」という問いに対して、実際にデプロイして動作確認まで完了している版。
+> Iteration 1には、Datadog Agent Observabilityの有効化方法が異なる4つの版があります。比較表は[このリポジトリの使い方](#how-to-use-this-repository)を参照してください。
 
 ## 前提条件
 

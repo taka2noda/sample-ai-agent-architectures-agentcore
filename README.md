@@ -434,9 +434,10 @@ iteration-1のコピー(`deployment_type: container`)を使い、デプロイ用
 
 **適した用途**: 「エージェントにDatadogを計装するだけでなく、Datadogのモニター・インシデント・ログなどをエージェント自身がMCP経由で照会できるようにしたい」場合。
 
-これまでのIteration 1の版はすべて「エージェントをDatadogで観測する」話でしたが、この版は逆方向です — iteration-1のコピーに`langchain-mcp-adapters`のMCPクライアントを組み込み、Datadog MCP Server(`https://mcp.<DD_SITE>/api/unstable/mcp-server/mcp`)にService Account Token(SAT)でBearer認証して接続し、取得したツールをLangGraphエージェントに追加します。通常のAPIキー/アプリケーションキーではこのエンドポイントは認証できず、SATが必須であることを実際に確認しています。
+これまでのIteration 1の版はすべて「エージェントをDatadogで観測する」話でしたが、この版は逆方向です — iteration-1のコピーに`langchain-mcp-adapters`のMCPクライアントを組み込み、Datadog MCP Server(`https://mcp.<DD_SITE>/api/unstable/mcp-server/mcp`)にService Account Token(SAT)でBearer認証して接続し、取得したツールをLangGraphエージェントに追加します。通常のAPIキー/アプリケーションキーではこのエンドポイントは認証できず、SATが必須であることを実際に確認しています。実際にデプロイし、「Datadog MCP経由でAPMのエラースパンを検索して」という指示に対しエージェントが実データを取得して回答することまでエンドツーエンドで確認済みです。
 
 - **接続方法**: `agent/agent.py`が`MultiServerMCPClient`でMCP Serverに接続し、既存のローカルツールと合わせてエージェントに渡す。`DD_MCP_TOKEN`未設定時はMCPツールなしで動作するフォールバックあり
+- **実機デプロイで発見した3つの落とし穴**: `?toolsets=all`(362ツール)はツール定義だけでプロンプトが236,793トークンとなりBedrockの200K上限を超えて機能しない、一部のMCPツールのJSON Schemaに`properties`キーがなくddtraceのLangGraph統合がクラッシュする、MCPツールは非同期(`_arun`)専用で同期`.invoke()`だと失敗する(`ainvoke()`への変更が必要)— いずれも該当フォルダのREADMEで詳細と修正方法を確認できます。
 
 [Iteration 1(MCP版)を見る →](./iteration-1-mcp-datadog/)
 

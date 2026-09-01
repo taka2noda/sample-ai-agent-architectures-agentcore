@@ -26,7 +26,7 @@ MODEL_ID = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 DD_SITE = os.environ.get("DD_SITE", "datadoghq.com")
 DD_MCP_TOKEN = os.environ.get("DD_MCP_TOKEN")
-DD_MCP_TOOLSETS = os.environ.get("DD_MCP_TOOLSETS", "all")
+DD_MCP_TOOLSETS = os.environ.get("DD_MCP_TOOLSETS", "apm,llmobs")
 DD_MCP_URL = f"https://mcp.{DD_SITE}/api/unstable/mcp-server/mcp?toolsets={DD_MCP_TOOLSETS}"
 
 
@@ -82,7 +82,24 @@ async def _load_datadog_mcp_tools():
             "headers": {"Authorization": f"Bearer {DD_MCP_TOKEN}"},
         }
     })
-    return await client.get_tools()
+    tools = await client.get_tools()
+
+    # A handful of Datadog MCP tools (zero-argument/internal ones, e.g.
+    # get_user_config) return a JSON schema with no "properties" key.
+    # langchain_core.tools.base.BaseTool.args assumes "properties" always
+    # exists and raises KeyError otherwise -- and so does ddtrace's LangGraph
+    # integration, which reads the same property to build its LLM
+    # Observability tool manifest at create_react_agent() time, crashing
+    # every invocation before it even runs. Drop those tools rather than
+    # crash agent initialization.
+    usable_tools = []
+    for tool in tools:
+        try:
+            tool.args
+        except KeyError:
+            continue
+        usable_tools.append(tool)
+    return usable_tools
 
 
 def get_agent():
@@ -97,7 +114,13 @@ def get_agent():
 @app.entrypoint
 def invoke(payload, context):
     prompt = payload.get("prompt", "Hello!") if payload else "Hello!"
-    result = get_agent().invoke({"messages": [("human", prompt)]})
+    # langchain-mcp-adapters tools only implement the async _arun, not sync
+    # _run, so calling create_react_agent's graph via the sync .invoke()
+    # raises "StructuredTool does not support sync invocation" as soon as
+    # LangGraph's ToolNode tries to call one. Using .ainvoke() (run via
+    # asyncio.run, since this handler itself runs synchronously in a worker
+    # thread with no event loop) lets LangGraph await the tool's async path.
+    result = asyncio.run(get_agent().ainvoke({"messages": [("human", prompt)]}))
 
     for msg in reversed(result.get("messages", [])):
         if hasattr(msg, 'content') and msg.type == "ai":
